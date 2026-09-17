@@ -986,6 +986,11 @@
               <FileType>1</FileType>
               <FilePath>..\APP\Src\app_config.c</FilePath>
             </File>
+            <File>
+              <FileName>app_hart.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\APP\Src\app_hart.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

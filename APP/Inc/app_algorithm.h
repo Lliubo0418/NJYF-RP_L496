@@ -10,7 +10,7 @@ extern "C" {
 /* ============================================================
  *  雷达 ADC 信号处理算法
  *
- *  输入：adc_buf[1024]（62.5kHz 采样，12-bit ADC 值）
+ *  输入：adc_buf[1024~3072]（62.5kHz 采样，12-bit ADC 值，点数随量程档位变化）
  *  处理流程：
  *    1. 滑动平均滤波（去高频噪声）
  *    2. 统计自适应阈值（mean + k*std，抑制噪声底）
@@ -28,7 +28,7 @@ extern "C" {
 
 /* 峰值结果 */
 typedef struct {
-    uint16_t index;       /* 峰在数组中的整数下标（0~999）*/
+    uint16_t index;       /* 峰在数组中的整数下标（0~3071）*/
     float    position;    /* 插值后的亚采样位置（更精确）*/
     float    amplitude;   /* 峰处滤波后的幅值 */
     uint16_t raw_value;   /* 峰处原始 ADC 值 */
@@ -69,7 +69,7 @@ void Algo_PrintResult(const Algo_Peak_t *peaks, uint8_t peak_count);
  *
  *  雷达时序：
  *    1. S6 输入捕获测低电平脉宽，满足 22-23ms 区间后延时 15ms 启动采样
- *    2. ADC 采样窗口 16ms（1024 点 × 16μs），采样期间遇 S6 下降沿 = 发射时刻 t₀  
+ *    2. ADC 采样窗口 = 目标点数 × 16μs，采样期间遇 S6 下降沿 = 发射时刻 t₀  
  *    3. 记录发射时刻对应的 ADC 采样点序号 tx_sample_offset
  *    4. 回波到达时刻 = 峰值在采样数组中的位置 peak_position
  *
@@ -80,7 +80,7 @@ void Algo_PrintResult(const Algo_Peak_t *peaks, uint8_t peak_count);
  *    distance = peak_position × dist_per_sample + zero_offset
  *
  *  其中：
- *    c = 3×10^8 m/s（光速）
+ *    c = 299792458.0f m/s（光速）
  *    TIM7_FREQ = 62500 Hz（周期 16μs）
  *    硬件放大(时间轴拉伸)比例 K = RADAR_HW_TIME_STRETCH
  *    dist_per_sample = c / (2 * TIM7_FREQ) / K = 2400 / K m/点
@@ -89,7 +89,7 @@ void Algo_PrintResult(const Algo_Peak_t *peaks, uint8_t peak_count);
  * ============================================================ */
 
 /* 雷达物理常数 */
-#define RADAR_SPEED_OF_LIGHT    3.0e8f      /* 光速 m/s */
+#define RADAR_SPEED_OF_LIGHT    299792458.0f      /* 光速 m/s */
 #define RADAR_TIM7_FREQUENCY    62500.0f    /* TIM7 采样频率 Hz（80MHz / 40 / 32）*/
 
 /* 硬件放大(时间轴拉伸)比例 K（即用户所说的硬件放大比例）：
@@ -97,7 +97,7 @@ void Algo_PrintResult(const Algo_Peak_t *peaks, uint8_t peak_count);
  * 实际 米/采样点 = (c / (2 * TIM7_FREQ)) / K = 2400 / K。
  * K 由硬件实测标定，暂置 1.0f（未放大，等效 2400 m/采样点）。
  * 后续只需调整此值即可得到合适的每采样点米数。 */
-#define RADAR_HW_TIME_STRETCH    1.0f
+#define RADAR_HW_TIME_STRETCH    79763.0f
 
 /* 距离标定参数（由应用层设置）*/
 typedef struct {
@@ -151,7 +151,7 @@ const uint16_t *Algo_GetBaseline(void);
 
 /**
   * @brief  从外部存储加载基线（EEPROM/Flash 恢复）
-  * @param  baseline : 基线数据指针（ADC_SAMPLE_COUNT 个 16-bit）
+  * @param  baseline : 基线数据指针（ADC_SAMPLE_COUNT_MAX=3072 个 16-bit，按当前档位只用前 N 个）
   */
 
 void Algo_SetBaseline(const uint16_t *baseline);

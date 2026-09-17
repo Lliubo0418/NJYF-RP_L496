@@ -5,20 +5,24 @@
   TIM2: 输入捕获 S6
   TIM3: S3 S4 S10
   TIM4: S7 S9 电容充放电
-  TIM7: 溢出中断驱动 ADCS7476 采样（SPI1 + DMA，1024 点）
+  TIM7: 溢出中断驱动 ADCS7476 采样（SPI1 + DMA，1024~3072 点随量程档位变化）
 */
 
 /* ============ 时序常量（对应 L496时序.md 第6节）============ */
-/* TIM3 @1MHz (1 tick = 1μs) */
-/* S3↑ = S6↑ + 5.9ms（样机 5.94ms，留 40μs 反应时间；本固件在 S6↑ 捕获 ISR
- * 内直接启动 TIM3，ISR 延迟 ~2μs，S3↑ 实际 ≈ S6↑+5.902ms，落在窗口内） */
-#define S3_START_US      5900U    /* S3↑ 时刻：S6↑ + 5.9ms */
-#define S3_WIDTH_US     36000U    /* S3 脉宽：36ms */
-#define S3_END_US       (S3_START_US + S3_WIDTH_US)   /* 41900μs */
-#define S4_DELAY_US       450U    /* S4↓ 相对 S3↑ 的延时 */
-#define S4_START_US      (S3_START_US + S4_DELAY_US)  /* 6350μs */
-#define S4_WIDTH_US       220U    /* S4 脉宽：220μs（样机 206μs） */
-#define S4_END_US        (S4_START_US + S4_WIDTH_US)  /* 6570μs */
+/* TIM3 @0.5MHz (PSC=160-1, 1 tick = 2μs)。
+ * 不用 1MHz 的原因：TIM3 是 16 位定时器，1μs/tick 最大仅 65.5ms，
+ * 而 70m 档 S3 结束沿在 S6↑+107.82ms → 必须降频到 2μs/tick（可覆盖 131ms）。
+ * 时序语义（μs）保持不变：S3↑=S6↑+5.9ms（样机 5.94ms，留 40μs 反应时间）。 */
+#define TIM3_TICK_US         2U     /* TIM3 计数单位（μs/tick）*/
+#define US2TICK(us)          ((us) / TIM3_TICK_US)
+#define S3_START_TICK        US2TICK(5900U)    /* 2950：S3↑ = S6↑+5.9ms */
+/* S3 脉宽随量程档位展宽：采样点数×16μs(TIM7 62.5kHz) + 20ms 宽裕
+ *   1024→36.4ms  2048→52.8ms  3072→69.2ms
+ * 必须覆盖 ADC 采样窗口（S4↑@6.57ms + 点数×16μs），20ms 为尾部余量。 */
+#define S3_SAMPLE_TICK       US2TICK(16U)      /* 8：每个 ADC 点 16μs */
+#define S3_WIDTH_MARGIN_TICK US2TICK(20000U)   /* 10000：尾部 20ms 宽裕 */
+#define S4_START_TICK        US2TICK(6350U)    /* 3175：S4↓ = S3↑+450μs */
+#define S4_END_TICK          US2TICK(6570U)    /* 3285：S4↑，S4 脉宽 220μs（样机 206μs），结束沿启动 ADC */
 
 /* ============ S3 测量调度（S3 两个一组，样机 0905 CSV 实测规律）============
  * 1) 组内：第二个 = 第一个 + 4T（52/52 个无批次间隔全部为 4T，铁证）；
@@ -48,7 +52,7 @@ volatile uint8_t f_ic_new = 0;   /* 1=有新的 f_ic_val 可读 */
 
 /* 发射时刻记录：ADC 采样期间 S6 下降沿对应的采样点序号 */
 volatile uint8_t  tx_sample_valid = 0;    /* 1=本次采样已记录到发射时刻 */
-volatile uint16_t tx_sample_offset = 0;   /* 发射时刻对应的 ADC 采样点序号（0~999）*/
+volatile uint16_t tx_sample_offset = 0;   /* 发射时刻对应的 ADC 采样点序号（0~3071）*/
 
 static uint32_t tim2_start = 0;
 static uint32_t tim2_end = 0;
@@ -86,17 +90,29 @@ extern SPI_HandleTypeDef hspi1;     /* CubeMX 生成（spi.c）*/
 extern TIM_HandleTypeDef htim7;    /* CubeMX 生成（tim.c）*/
 extern TIM_HandleTypeDef htim2;    /* CubeMX 生成（tim.c），提供 TIM2 CNT 作为测距时间基准 */
 
-volatile uint16_t adc_buf[ADC_SAMPLE_COUNT]; /* ADC 采样缓冲区（12-bit 有效值）*/
+volatile uint16_t adc_buf[ADC_SAMPLE_COUNT_MAX]; /* ADC 采样缓冲区（12-bit 有效值，按最大 3072 点分配）*/
 volatile uint16_t adc_sample_count = 0;      /* 已采样点数 */
+volatile uint16_t adc_target_count = ADC_SAMPLE_BASE; /* 本次采样目标点数（BSP_Pulse_Start 快照，TIM7 ISR 读）*/
 volatile uint8_t  adc_dma_busy = 0;         /* 1=SPI1-DMA 接收进行中 */
-volatile uint8_t  adc_done = 0;            /* 1=采样结束（成功满 1024 或失败中止）*/
+volatile uint8_t  adc_done = 0;            /* 1=采样结束（成功采满 adc_target_count 或失败中止）*/
 volatile uint8_t  adc_error = 0;           /* 1=因连续 ADC_FAIL_MAX 次失败而中止 */
 static volatile uint8_t adc_fail_count = 0; /* 连续失败计数（成功一次即清零）*/
-static volatile uint8_t adc_active = 0;     /* 1=采样流程进行中（从 Start 到 done，供测量触发互斥）*/
+volatile uint8_t adc_active = 0;            /* 1=采样流程进行中（从 Start 到 done，供测量触发互斥；bsp_spi.c DMA 回调也会清零）*/
+
+/* 量程档位（display 经 DPARAM_RANGE_SETTING 下发 → app_config 调 BSP_Range_SetLevel）。
+ * s_range_level_req 由主循环写；adc_target_count 在每次测量序列开始
+ * （BSP_Pulse_Start）时快照，保证采样进行中改档不影响本次采样。
+ * S3 第二沿在 OC 回调中直接由同一快照 adc_target_count 计算，无需另存宽度。 */
+static volatile uint8_t s_range_level_req = 1U;          /* 请求档位 1~3 */
 
 void BSP_Pulse_Start(void)
 {
   HAL_NVIC_DisableIRQ(TIM3_IRQn);
+
+  /* 量程档位快照：本次测量序列的 ADC 目标点数由此固定。
+   * 在 TIM2 ISR 内执行，主循环不会穿插；后续 BSP_ADCsamp_Start（S4 结束沿）
+   * 与 TIM3 S3 第二沿回调均使用同一 adc_target_count。 */
+  adc_target_count = (uint16_t)ADC_SAMPLE_BASE * (uint16_t)s_range_level_req;
 
   /*  强制停止定时器 */
   htim3.Instance->CR1 &= ~TIM_CR1_CEN;
@@ -118,9 +134,9 @@ void BSP_Pulse_Start(void)
   /* S10 (PC9) 常高 */
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_9, GPIO_PIN_SET);
 
-  /* S3↑ @ S3_START_US(5900μs)；S4↓ @ S4_START_US(6350μs) */
-  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, S3_START_US);
-  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, S4_START_US);
+  /* S3↑ @ S3_START_TICK(5900μs)；S4↓ @ S4_START_TICK(6350μs)，单位 2μs/tick */
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, S3_START_TICK);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, S4_START_TICK);
 
   __HAL_TIM_ENABLE_IT(&htim3, TIM_IT_CC1 | TIM_IT_CC3);
 
@@ -241,11 +257,16 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
     switch (htim->Channel)
     {
     case HAL_TIM_ACTIVE_CHANNEL_1:
-      /* S3↑ @5900μs：设置第二沿为 S3_END_US(41900μs)，脉宽 = 41900-5900 = 36000μs */
+      /* S3↑@5900μs：第二沿 = S3_START_TICK + 本档位 S3 脉宽
+       * 脉宽(tick) = adc_target_count×8(16μs/点) + 10000(20ms 宽裕)
+       * 默认档 2950+18192=21142(42.28ms)；70m 档 2950+50960=53910(107.82ms) */
       if (tim3_s3_state == 0)
       {
+        uint32_t s3_end_tick = S3_START_TICK
+                             + (uint32_t)adc_target_count * S3_SAMPLE_TICK
+                             + S3_WIDTH_MARGIN_TICK;
         tim3_s3_state = 1;
-        __HAL_TIM_SET_COMPARE(htim, TIM_CHANNEL_1, S3_END_US);
+        __HAL_TIM_SET_COMPARE(htim, TIM_CHANNEL_1, s3_end_tick);
       }
       else
       {
@@ -256,12 +277,12 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
       break;
 
     case HAL_TIM_ACTIVE_CHANNEL_3:
-      /* S4↓ @6350μs：设置第二沿为 S4_END_US(6556μs)，脉宽 = 6556-6350 = 206μs */
+      /* S4↓@6350μs：第二沿 S4_END_TICK=3285(6570μs)，脉宽 220μs */
       if (tim3_s4_state == 0)
       {
         tim3_s4_state = 1;
         GPIOC->BSRR = (uint32_t)GPIO_PIN_8 << 16U;   /* S4↓ (PC8 LOW) */
-        __HAL_TIM_SET_COMPARE(htim, TIM_CHANNEL_3, S4_END_US);
+        __HAL_TIM_SET_COMPARE(htim, TIM_CHANNEL_3, S4_END_TICK);
       }
       else
       {
@@ -269,7 +290,7 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
         __HAL_TIM_DISABLE_IT(htim, TIM_IT_CC3);
         TIM_CCxChannelCmd(htim->Instance, TIM_CHANNEL_3, TIM_CCx_DISABLE);
         tim3_s4_state = 2;
-        /* S4 脉冲结束沿 → 启动 ADC（TIM7 驱动 1024 点 SPI 采样）*/
+        /* S4 脉冲结束沿 → 启动 ADC（TIM7 驱动目标点数 SPI 采样）*/
         BSP_ADCsamp_Start();
       }
       break;
@@ -435,6 +456,31 @@ void BSP_ADCsamp_Start(void)
   HAL_NVIC_EnableIRQ(TIM7_IRQn);
 }
 
+/* ============ 量程档位 API（display DPARAM_RANGE_SETTING → app_config 调用）============ */
+void BSP_Range_SetLevel(uint8_t level)
+{
+  /* 非法档位钳为 1（0~28m，1024 点），保证 adc_target_count 与缓冲区始终有效。
+   * 最大倍数 ADC_SAMPLE_MULT_MAX=3（3072 点覆盖 92m，含 70m/84m 量程）。 */
+  if ((level == 0U) || (level > ADC_SAMPLE_MULT_MAX))
+  {
+    level = 1U;
+  }
+  /* 只更新请求值；adc_target_count 在下一次 BSP_Pulse_Start（TIM2 S6↑ ISR）
+   * 快照，采样进行中改档不会影响本次测量 */
+  s_range_level_req = level;
+}
+
+uint8_t BSP_Range_GetLevel(void)
+{
+  return s_range_level_req;
+}
+
+uint16_t BSP_Range_GetSampleCount(void)
+{
+  /* 返回当前生效点数（采样完成后由算法层主循环读取，值在整个采样期稳定）*/
+  return adc_target_count;
+}
+
 void BSP_TIM5_Delay_us(uint32_t delay_us)
 {
   HAL_NVIC_DisableIRQ(TIM5_IRQn);
@@ -538,8 +584,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     return;
   }
 
-  /* 已采满 1024 点：停止 TIM7 */
-  if (adc_sample_count >= ADC_SAMPLE_COUNT)
+  /* 已采满本档位目标点数（1024~3072）：停止 TIM7 */
+  if (adc_sample_count >= adc_target_count)
   {
     __HAL_TIM_DISABLE_IT(htim, TIM_IT_UPDATE);
     __HAL_TIM_DISABLE(htim);

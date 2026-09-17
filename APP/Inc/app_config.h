@@ -11,7 +11,7 @@ extern "C" {
 /* ============================================================
  * 主板（L496）运行配置层
  *
- * 显示板（F1）上所有“需要下发到主板”的参数，统一经 SET_PARAM / SET_STR
+ * 显示板（F1）上所有"需要发往主板"的参数，统一经 SET_PARAM / SET_STR
  * 上行写入本模块的 gRadarConfig。测距主循环（app_radar.c）每轮测量后
  * 调用 ApplyRange / ApplyDamping / IsSim 等接口消费这些配置。
  *
@@ -62,10 +62,10 @@ extern RadarConfig_t gRadarConfig;
 /* 初始化：填入与显示板默认一致的初值 */
 void App_Config_Init(void);
 
-/* 显示板下行写入单个数值型参数（float 承载；uint8 字段按值强转） */
+/* 显示板上行写入单个数值型参数（float 承载；uint8 字段按值强转） */
 void App_Config_SetParam(DISP_PARAM_ID id, float value);
 
-/* 显示板下行写入字符串型参数（当前仅 sensorTag，对应 DPARAM_SENSOR_TAG） */
+/* 显示板上行写入字符串型参数（当前仅 sensorTag，对应 DPARAM_SENSOR_TAG） */
 void App_Config_SetStr(DISP_PARAM_ID id, const char *str);
 
 /* 复位动作：
@@ -93,6 +93,19 @@ float App_Config_SimDistance(void);
 
 /* 传感器温度（占位：返回 25.0℃，待接 NTC/内部温度传感器后替换） */
 float App_Config_GetSensorTemp(void);
+
+/* 把 gRadarConfig 写入外部 EEPROM（24LC256）。
+ * 格式：magic(2B='A5 5A') + version(1B=1) + crc16(2B, 小端) + payload(81B)
+ * 返回 0=成功，非 0=失败。不自动调用，由上层在合适时机触发。 */
+uint8_t App_Config_SaveToEEPROM(void);
+
+/* 从 EEPROM 读取并校验后写回 gRadarConfig。
+ * 返回 0=成功（magic/version/CRC 均通过），非 0=失败（保持 gRadarConfig 不变）。 */
+uint8_t App_Config_LoadFromEEPROM(void);
+
+/* 按 dispproto.h PARAM_DUMP 布局序列化 cfg 到 buf（81 字节）。
+ * 供 app_disp.c 的 PARAM_DUMP 下行与 EEPROM 持久化复用，保证双板布局单一来源。 */
+void App_Config_Serialize(const RadarConfig_t *cfg, uint8_t *buf);
 
 #ifdef __cplusplus
 }

@@ -2,6 +2,7 @@
 #include "bsp_gpio.h"
 #include <stdio.h>
 #include <stdarg.h>
+#include "bsp_debug.h"   /* 串口调试总开关：DEBUG_PRINT_ENABLE=0 时 printf 编译期消除（须在 stdio.h 之后）*/
 
 /* 串口用途与引脚（来自 usart.c MspInit）：
  *   UART4  调试 printf      PA0=TX  PA1=RX

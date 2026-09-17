@@ -8,7 +8,9 @@
 #include "bsp_timer.h"
 #include "bsp_usart.h"
 #include "app_disp.h"
+#include "app_hart.h"
 #include <stdio.h>
+#include <string.h>
 
 /* F_IC 阈值统一在 bsp_timer.h 定义（目标中心 22875μs，死区 ±500μs）。
  * 注意：阈值曾被误改为 27920/28920（中心 28420）—— 把上电未收敛的实测脉宽
@@ -18,7 +20,7 @@
 
 /* 宽脉冲粗调：误差 ≥ F_IC_WIDE_TH_US 时用 S7_S9_WIDE_US 宽脉冲加快上电充电/放电，
  * 否则固定 2μs 精调（可按实际收敛速度调整这两个宏） */
-#define F_IC_WIDE_TH_US     100U
+#define F_IC_WIDE_TH_US     400U
 #define S7_S9_WIDE_US        20U
 #define S7_S9_FINE_US         2U
 
@@ -82,7 +84,7 @@ static Algo_RadarResult_t s_last_result;            /* 最近一次测量结果�
   * @brief  对"已采满"的 adc_buf 运行滤波 + 回波发现测距
   * @note   仅当 BSP_ADCsamp_IsDone()==1 时调用（adc_buf 已稳定，无 ISR 竞争）
   *         流程：Algo_MeasureDistance → 处理返回码（无基线则自动学习空罐基线）
-  *         → 成功则 printf 调试 + Disp_SendMeas 经 USART1 上报显示板
+  *         → 成功则 printf 调试 + Disp_DownSendMeas 经 USART1 上报显示板
   * @retval 无（结果存入 s_last_result，副作用为串口输出 + 下行帧发送）
   * @complexity  时间 O(N*W)（由 Algo_MeasureDistance 主导），空间 O(N) 栈
   */
@@ -131,20 +133,57 @@ static void App_Radar_ProcessSample(void)
     s_last_result.distance = App_Config_ApplyRange(s_last_result.distance);
     s_last_result.distance = App_Config_ApplyDamping(s_last_result.distance);
 
+    /* 更新 HART 主变量（PV = 物位/距离） */
+    App_HART_SetPV(s_last_result.distance);
+
     /* ===== 协议发送接入点 =====
      * MEAS 已自动下发；回波/诊断已接入。 */
-    Disp_SendMeas(&s_last_result, (tx_sample_valid ? 1U : 0U));
+    Disp_DownSendMeas(&s_last_result, (tx_sample_valid ? 1U : 0U));
 
-    /* 回波包络：默认抽点归一化，用户可替换 Disp_BuildEcho 算法 */
-    // static uint8_t echo128[DISP_ECHO_LEN];
-    // Disp_BuildEcho(adc_buf, ADC_SAMPLE_COUNT, echo128);
-    // Disp_SendEcho(echo128);
+    /* 回波包络：按比例从 adc_buf 抽点归一化为 128 点下行（R4 修复） */
+    {
+        static uint8_t echo128[DISP_ECHO_LEN];
+        uint16_t n = BSP_Range_GetSampleCount();
+        if (n == 0U || n > ADC_SAMPLE_COUNT_MAX) n = ADC_SAMPLE_COUNT_MAX;
+        Disp_BuildEcho((const uint16_t *)(void *)adc_buf, n, echo128);
+        Disp_DownSendEcho(echo128);
+    }
 
-    /* 诊断信息（含传感器温度占位） */
+    /* 诊断信息（含传感器温度） */
     {
         uint8_t reliability = (s_last_result.peak_count > 0U) ? 100U : 0U;
         uint8_t status      = (s_last_result.peak_count > 0U) ? 0x01U : 0x00U;
-        Disp_SendDiag(reliability, status, 0.0f, 0.0f, App_Config_GetSensorTemp());
+        Disp_DownSendDiag(reliability, status, 0.0f, 0.0f, App_Config_GetSensorTemp());
+    }
+
+    /* ===== 4-20mA 输出（R7 修复）：距离 ↔ 电流线性标定 =====
+     * lowAdjustVal  → 4mA  (DAC=0)
+     * highAdjustVal → 20mA (DAC=65535)
+     * 超界钳位；currFault 决定无效测量时的故障电流。 */
+    {
+        uint16_t dac = 0U;
+        if (s_last_result.peak_count > 0U)
+        {
+            float lo = gRadarConfig.lowAdjustVal;
+            float hi = gRadarConfig.highAdjustVal;
+            float span = hi - lo;
+            float d  = s_last_result.distance;
+            if (span <= 0.0f) span = 1.0f;
+            if (d <= lo)      dac = 0U;
+            else if (d >= hi) dac = 65535U;
+            else              dac = (uint16_t)((d - lo) / span * 65535.0f);
+        }
+        else
+        {
+            /* 无效测量：故障电流 —— 0=3.6mA(DAC≈0), 1=22.8mA(DAC=65535), 2/3=保持 */
+            switch (gRadarConfig.currFault)
+            {
+                case 0:  dac = 0U;       break;   /* 3.6mA */
+                case 1:  dac = 65535U;   break;   /* 22.8mA */
+                default: break;                  /* 保持上一次值 */
+            }
+        }
+        AD5421_SetDACOutput(dac);
     }
 }
 
@@ -165,7 +204,7 @@ void App_Radar_Run(void)
 
     /* ============================================================
      * 滤波 + 测距接入点（核心）
-     *   TIM7 采样满 1024 点后置 adc_done=1，且 ISR 已自行关闭 TIM7，
+     *   TIM7 采样满目标点数（1024~3072）后置 adc_done=1，且 ISR 已自行关闭 TIM7，
      *   不会再写 adc_buf，此时在主循环读取 adc_buf 是安全的（无 ISR 竞争）。
      *   用 s_sample_consumed 保证“每完成一次采样只跑一次算法”：
      *     - adc_done==1 且未消费 -> 跑算法，置消费标志
@@ -243,4 +282,40 @@ void App_Radar_Run(void)
     /* 死区内：无需校正。测量序列（S3/S4/ADC）已由 TIM2 捕获 ISR 在 S6↑ 时
      * 自动启动（脉宽进入 [F_IC_MEAS_LOWER_US, F_IC_MEAS_UPPER_US] 即触发），
      * 不再经主循环/TIM5 启动，避免调度延迟影响 S3↑ = S6↑+5.9ms 的相位精度 */
+}
+
+/* ===================== 调试标定通道（UART4） =====================
+ * 与双板串口协议完全独立，仅用于产线/调试时通过 UART4(printf口) 修正算法标定。
+ * 命令格式：CAL <dist_per_sample_m> <zero_offset_m>
+ *   例：CAL 0.0301 0.5
+ * 解析成功后调用 Algo_SetCalibration 并回显确认。 */
+extern UART_HandleTypeDef huart4;
+
+void App_Debug_Task(void)
+{
+    static char line[64];
+    static uint8_t pos = 0U;
+    uint8_t b;
+
+    while (HAL_UART_Receive(&huart4, &b, 1, 0) == HAL_OK)
+    {
+        if (b == '\r' || b == '\n')
+        {
+            if (pos > 0U)
+            {
+                line[pos] = '\0';
+                float dps = 0.0f, off = 0.0f;
+                if (sscanf(line, "CAL %f %f", &dps, &off) == 2)
+                {
+                    Algo_SetCalibration(dps, off);
+                    printf("[DBG] calibration set: dist_per_sample=%.4f m, zero_offset=%.4f m\r\n", dps, off);
+                }
+                pos = 0U;
+            }
+        }
+        else if (pos < sizeof(line) - 1U)
+        {
+            line[pos++] = (char)b;
+        }
+    }
 }

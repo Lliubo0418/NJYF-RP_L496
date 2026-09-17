@@ -42,7 +42,9 @@
 #include "app_hwtest.h"
 #include "delay.h"
 #include "app_radar.h"
+#include "app_config.h"
 #include "app_disp.h"
+#include "app_hart.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -127,7 +129,11 @@ int main(void)
 
   /* 雷达业务初始化：算法标定（距离换算系数）等 */
   App_Radar_Init();
+  App_Config_LoadFromEEPROM();   /* 开机从 EEPROM 恢复用户配置（失败则保持默认） */
+  STLM75_Init();                 /* 温度传感器初始化 */
+  AD5421_Init();                 /* 4-20mA DAC 初始化 */
   Disp_Init();   /* 注册 USART1 上行命令回调并启动接收（预留） */
+  App_HART_Init();               /* HART 从机初始化（USART2 1200 8O1） */
 
   // Test_STLM75M2F();
   // Test_24LC256();
@@ -145,12 +151,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-//    if(f_ic_sta == 1){                            //捕获
-//      printf("s6 = %d us\n",f_ic_val);
-//    }
-// //    uint16_t adc_value = spi1_read_word();        //读取adc值
-// //    printf("adc_value : %d\n",adc_value);
-//		 BSP_Pulse_Start();
+		Disp_Poll();          /* 处理显示板上行帧（主循环，不阻塞采样） */
+		App_HART_Task();      /* HART 从机收发 */
+		App_Debug_Task();     /* 调试标定通道（UART4 CAL 命令） */
 		App_Radar_Run();
 
 //     HAL_Delay(100);

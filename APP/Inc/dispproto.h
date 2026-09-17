@@ -18,6 +18,7 @@
  *     0x02 ECHO  回波包络：128×u8（已归一化 0~255）                                        = 128B
  *     0x03 DIAG  诊断：reliability(u8) status(u8) peakMinEmpty(f32) peakMaxEmpty(f32) temperature(f32) = 14B
  *     0x04 INFO  传感器信息：sensorType(u8) verMajor(u8) verMinor(u8)                        = 3B
+ *     0x05 PARAM_DUMP 全量配置：gRadarConfig 序列化（见 DISP_PARAM_DUMP_LEN）              = 变长
  *   上行（显示板 -> 主板）
  *     0x81 REQ_ECHO   请求回波帧（无 payload）
  *     0x82 REQ_MEAS   请求测量帧（无 payload）
@@ -25,6 +26,7 @@
  *     0x84 SET_PARAM  设置参数：param_id(u8) value(f32)                                      = 5B
  *     0x85 SET_STR    设置字符串参数：param_id(u8) len(u8) data(len)                         = 2B+len
  *     0x86 REQ_INFO   请求传感器信息（无 payload）
+ *     0x87 REQ_PARAM_DUMP 请求全量配置（无 payload）
  *
  * 说明：字段映射 / 回波降采样算法等“业务细节”为预留项，由用户在对应
  *       APP 文件中按需填充；本文件只规定帧结构与校验。
@@ -38,6 +40,7 @@
 #define DISP_CMD_ECHO      0x02
 #define DISP_CMD_DIAG      0x03
 #define DISP_CMD_INFO      0x04   /* 传感器信息（主板 -> 显示板） */
+#define DISP_CMD_PARAM_DUMP 0x05  /* 全量配置（主板 -> 显示板） */
 
 /* 上行命令 */
 #define DISP_CMD_REQ_ECHO  0x81
@@ -46,12 +49,46 @@
 #define DISP_CMD_SET_PARAM 0x84   /* 设置参数：param_id(u8) + value(f32) = 5B */
 #define DISP_CMD_SET_STR   0x85   /* 设置字符串参数：param_id(u8) + len(u8) + data = 2B+len */
 #define DISP_CMD_REQ_INFO  0x86   /* 请求传感器信息（无 payload） */
+#define DISP_CMD_REQ_PARAM_DUMP 0x87  /* 请求全量配置（无 payload） */
 
 /* 固定长度 */
 #define DISP_ECHO_LEN      128u
 #define DISP_MEAS_LEN      14u
 #define DISP_DIAG_LEN      14u   /* reliability(u8) status(u8) peakMinEmpty(f32) peakMaxEmpty(f32) temperature(f32) */
 #define DISP_INFO_LEN      3u    /* sensorType(u8) verMajor(u8) verMinor(u8) */
+/* PARAM_DUMP(0x05) 负载为 gRadarConfig 字段按以下固定顺序逐字段 memcpy 序列化
+ * （避免结构体 padding 差异，双板必须严格按此顺序读写，共 81 字节）：
+ *   [0..3]   lowAdjustPct   (f32)
+ *   [4..7]   lowAdjustVal   (f32)
+ *   [8..11]  highAdjustPct  (f32)
+ *   [12..15] highAdjustVal  (f32)
+ *   [16]     matType        (u8)
+ *   [17]     matFastChange  (u8)
+ *   [18]     matFirstWave   (u8)
+ *   [19]     matSurfAngle   (u8)
+ *   [20]     matFoamDust    (u8)
+ *   [21]     matSmallDK     (u8)
+ *   [22]     matPipe        (u8)
+ *   [23..26] pipeDiameter   (f32)
+ *   [27..30] dampTime       (f32)
+ *   [31]     outMap         (u8)
+ *   [32]     scaleUnit      (u8)
+ *   [33..36] scaleVal       (f32)
+ *   [37..40] rangeSetting   (f32)
+ *   [41..44] blindZone      (f32)
+ *   [45]     currMode       (u8)
+ *   [46]     currFault      (u8)
+ *   [47]     currMin        (u8)
+ *   [48]     servReset      (u8)
+ *   [49]     servUnit       (u8)
+ *   [50]     servHART       (u8)
+ *   [51]     servHARTAddr   (u8)
+ *   [52..55] servOffset     (f32)
+ *   [56..59] threshEcho     (f32)
+ *   [60..63] threshEnv      (f32)
+ *   [64]     diagSim        (u8)
+ *   [65..80] sensorTag      (char[16])
+ */
 
 /* 协议帧最大长度（含头尾），用于本地缓冲 */
 #define DISP_FRAME_MAX     (2u + 1u + 1u + 255u + 1u)   /* 260 */

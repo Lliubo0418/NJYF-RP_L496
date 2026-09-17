@@ -30,6 +30,10 @@ void App_Radar_Init(void);
 
 void App_Radar_Run(void);
 
+/* 调试标定通道：解析 UART4 的 "CAL <dps> <offset>" 命令，调用 Algo_SetCalibration。
+ * 仅产线/调试用，与双板串口协议独立。主循环调用。 */
+void App_Debug_Task(void);
+
 #ifdef __cplusplus
 }
 #endif

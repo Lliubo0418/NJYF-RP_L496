@@ -27,12 +27,12 @@ void Disp_Init(void);
  *   res  - 雷达测量结果指针（Algo_RadarResult_t）
  *   mode - 测量模式标识（1 字节，业务自定义含义） */
 
-void Disp_SendMeas(const Algo_RadarResult_t *res, uint8_t mode);
+void Disp_DownSendMeas(const Algo_RadarResult_t *res, uint8_t mode);
 /* 下行：发送一帧 ECHO 回波包络（命令 0x02）。
  * 参数：
  *   echo128 - 已归一化到 0~255 的 128 点回波数组指针（为 NULL 时直接返回） */
 
-void Disp_SendEcho(const uint8_t *echo128);
+void Disp_DownSendEcho(const uint8_t *echo128);
 /* 发送 DIAG 诊断：reliability=可靠性(1B) status=状态字(1B)
  *                  peakMinEmpty/peakMaxEmpty=空高极值(f32) temperature=传感器温度(f32) */
 /* 下行：发送一帧 DIAG 诊断信息（命令 0x03）。
@@ -42,12 +42,20 @@ void Disp_SendEcho(const uint8_t *echo128);
  *   peakMinEmpty - 空高最小峰值（float，4 字节）
  *   peakMaxEmpty - 空高最大峰值（float，4 字节） */
 
-void Disp_SendDiag(uint8_t reliability, uint8_t status, float peakMinEmpty, float peakMaxEmpty, float temperature);
+void Disp_DownSendDiag(uint8_t reliability, uint8_t status, float peakMinEmpty, float peakMaxEmpty, float temperature);
 
 /* 下行：发送一帧 INFO 传感器信息（命令 0x04）。
  * 参数：无（内容取自 App_Config 与固定固件版本号） */
 
-void Disp_SendInfo(void);
+void Disp_DownSendInfo(void);
+
+/* 下行：发送全量配置 PARAM_DUMP（命令 0x05）。
+ * 把 gRadarConfig 按 dispproto.h 定义的 81 字节布局序列化后发送。 */
+void Disp_DownSendParamDump(void);
+
+/* 主循环轮询：消费 USART1 接收队列中的完整上行帧并执行业务（Task 13 采样优先改造后使用）。
+ * 当前 Disp_OnRxByte 直接处理，此函数为空操作兼容；改造后 ISR 仅入队，此处出队处理。 */
+void Disp_Poll(void);
 
 /* 回波包络构建（预留）：把 adc 降采样归一化为 128 点。
  * 默认实现为简单抽点 + 线性归一化，用户可替换为更优算法。
@@ -70,5 +78,9 @@ void Disp_BuildEcho(const uint16_t *adc, uint16_t adc_len, uint8_t *out128);
  *   len     - 负载字节数 */
 
 void Disp_OnUplink(uint8_t cmd, const uint8_t *payload, uint8_t len);
+
+/* 查询并清除显示板的测量请求标志（REQ_MEAS / KEY 触发）。
+ * app_radar.c 在每轮测量完成后调用，返回 1 表示应补发一帧 MEAS。 */
+uint8_t Disp_ConsumeMeasReq(void);
 
 #endif /* __APP_DISP_H */

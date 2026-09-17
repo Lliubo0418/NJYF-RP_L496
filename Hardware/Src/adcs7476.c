@@ -58,6 +58,9 @@ HAL_StatusTypeDef ADCS7476_Read(uint16_t *pValue)
     return HAL_OK;
 }
 
+/* DMA 异步版已停用（见 bsp_spi.c 说明：TIM7 16μs 周期下 DMA 固定开销过大，
+ * 实际采样率仅 ~31kHz），恢复时取消本 #if 0 及 bsp_spi.c / bsp_timer.c 对应开关 */
+#if 0
 HAL_StatusTypeDef ADCS7476_Read_DMA(uint16_t *pValue)
 {
     HAL_StatusTypeDef status;
@@ -81,3 +84,4 @@ HAL_StatusTypeDef ADCS7476_Read_DMA(uint16_t *pValue)
 
     return status;
 }
+#endif

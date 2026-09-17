@@ -103,6 +103,10 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN Private defines */
 
+/* 串口调试总开关：DEBUG_PRINT_ENABLE 置 0 即全工程关闭 printf（见 bsp_debug.h）。
+ * 所有业务模块经 main.h 包含链自动生效，协议帧（USART1）不受影响。 */
+#include "bsp_debug.h"
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

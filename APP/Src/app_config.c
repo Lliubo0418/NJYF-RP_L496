@@ -1,6 +1,144 @@
 #include "app_config.h"
 #include "app_algorithm.h"   /* Algo_LearnEmptyTank */
+#include "bsp_timer.h"       /* BSP_Range_SetLevel：量程档位 → ADC 点数 / S3 脉宽 */
+#include "24lc256.h"         /* EEPROM 持久化 */
+#include "stlm75m2f.h"       /* 真实温度 */
 #include <string.h>
+
+#define CFG_EEPROM_ADDR     0x0000u     /* EEPROM 存储起始地址 */
+#define CFG_MAGIC_0         0xA5u
+#define CFG_MAGIC_1         0x5Au
+#define CFG_VERSION         1u
+#define CFG_PAYLOAD_LEN     81u         /* 与 dispproto.h PARAM_DUMP 布局一致 */
+#define CFG_HEADER_LEN      5u          /* magic(2) + version(1) + crc16(2) */
+
+/* 前向声明：LoadFromEEPROM 在 RangeToLevel 定义之前调用 */
+static uint8_t App_Config_RangeToLevel(float range_m);
+
+/* CRC16-CCITT（poly=0x1021, init=0xFFFF），用于 EEPROM 配置校验 */
+static uint16_t App_CRC16(const uint8_t *data, uint16_t len)
+{
+    uint16_t crc = 0xFFFFu;
+    for (uint16_t i = 0; i < len; i++)
+    {
+        crc ^= (uint16_t)data[i] << 8;
+        for (uint8_t b = 0; b < 8; b++)
+        {
+            if (crc & 0x8000u)
+                crc = (crc << 1) ^ 0x1021u;
+            else
+                crc = crc << 1;
+        }
+    }
+    return crc;
+}
+
+/* 按 dispproto.h PARAM_DUMP 布局序列化 gRadarConfig（81 字节，与显示板严格一致） */
+void App_Config_Serialize(const RadarConfig_t *cfg, uint8_t *buf)
+{
+    uint16_t off = 0;
+    memcpy(&buf[off], &cfg->lowAdjustPct, 4); off += 4;
+    memcpy(&buf[off], &cfg->lowAdjustVal, 4); off += 4;
+    memcpy(&buf[off], &cfg->highAdjustPct, 4); off += 4;
+    memcpy(&buf[off], &cfg->highAdjustVal, 4); off += 4;
+    buf[off++] = cfg->matType;
+    buf[off++] = cfg->matFastChange;
+    buf[off++] = cfg->matFirstWave;
+    buf[off++] = cfg->matSurfAngle;
+    buf[off++] = cfg->matFoamDust;
+    buf[off++] = cfg->matSmallDK;
+    buf[off++] = cfg->matPipe;
+    memcpy(&buf[off], &cfg->pipeDiameter, 4); off += 4;
+    memcpy(&buf[off], &cfg->dampTime, 4); off += 4;
+    buf[off++] = cfg->outMap;
+    buf[off++] = cfg->scaleUnit;
+    memcpy(&buf[off], &cfg->scaleVal, 4); off += 4;
+    memcpy(&buf[off], &cfg->rangeSetting, 4); off += 4;
+    memcpy(&buf[off], &cfg->blindZone, 4); off += 4;
+    buf[off++] = cfg->currMode;
+    buf[off++] = cfg->currFault;
+    buf[off++] = cfg->currMin;
+    buf[off++] = cfg->servReset;
+    buf[off++] = cfg->servUnit;
+    buf[off++] = cfg->servHART;
+    buf[off++] = cfg->servHARTAddr;
+    memcpy(&buf[off], &cfg->servOffset, 4); off += 4;
+    memcpy(&buf[off], &cfg->threshEcho, 4); off += 4;
+    memcpy(&buf[off], &cfg->threshEnv, 4); off += 4;
+    buf[off++] = cfg->diagSim;
+    memcpy(&buf[off], cfg->sensorTag, 16); off += 16;
+}
+
+static void Config_Deserialize(RadarConfig_t *cfg, const uint8_t *buf)
+{
+    uint16_t off = 0;
+    float f; uint8_t u;
+    memcpy(&f, &buf[off], 4); cfg->lowAdjustPct = f; off += 4;
+    memcpy(&f, &buf[off], 4); cfg->lowAdjustVal = f; off += 4;
+    memcpy(&f, &buf[off], 4); cfg->highAdjustPct = f; off += 4;
+    memcpy(&f, &buf[off], 4); cfg->highAdjustVal = f; off += 4;
+    u = buf[off++]; cfg->matType = u;
+    u = buf[off++]; cfg->matFastChange = u;
+    u = buf[off++]; cfg->matFirstWave = u;
+    u = buf[off++]; cfg->matSurfAngle = u;
+    u = buf[off++]; cfg->matFoamDust = u;
+    u = buf[off++]; cfg->matSmallDK = u;
+    u = buf[off++]; cfg->matPipe = u;
+    memcpy(&f, &buf[off], 4); cfg->pipeDiameter = f; off += 4;
+    memcpy(&f, &buf[off], 4); cfg->dampTime = f; off += 4;
+    u = buf[off++]; cfg->outMap = u;
+    u = buf[off++]; cfg->scaleUnit = u;
+    memcpy(&f, &buf[off], 4); cfg->scaleVal = f; off += 4;
+    memcpy(&f, &buf[off], 4); cfg->rangeSetting = f; off += 4;
+    memcpy(&f, &buf[off], 4); cfg->blindZone = f; off += 4;
+    u = buf[off++]; cfg->currMode = u;
+    u = buf[off++]; cfg->currFault = u;
+    u = buf[off++]; cfg->currMin = u;
+    u = buf[off++]; cfg->servReset = u;
+    u = buf[off++]; cfg->servUnit = u;
+    u = buf[off++]; cfg->servHART = u;
+    u = buf[off++]; cfg->servHARTAddr = u;
+    memcpy(&f, &buf[off], 4); cfg->servOffset = f; off += 4;
+    memcpy(&f, &buf[off], 4); cfg->threshEcho = f; off += 4;
+    memcpy(&f, &buf[off], 4); cfg->threshEnv = f; off += 4;
+    u = buf[off++]; cfg->diagSim = u;
+    memcpy(cfg->sensorTag, &buf[off], 16); off += 16;
+    cfg->sensorTag[15] = '\0';
+}
+
+uint8_t App_Config_SaveToEEPROM(void)
+{
+    uint8_t frame[CFG_HEADER_LEN + CFG_PAYLOAD_LEN];
+    frame[0] = CFG_MAGIC_0;
+    frame[1] = CFG_MAGIC_1;
+    frame[2] = CFG_VERSION;
+    App_Config_Serialize(&gRadarConfig, &frame[CFG_HEADER_LEN]);
+    uint16_t crc = App_CRC16(&frame[CFG_HEADER_LEN], CFG_PAYLOAD_LEN);
+    frame[3] = (uint8_t)(crc & 0xFFu);
+    frame[4] = (uint8_t)(crc >> 8);
+
+    HAL_StatusTypeDef st = EEPROM_WriteBytes(CFG_EEPROM_ADDR, frame, sizeof(frame));
+    return (st == HAL_OK) ? 0u : 1u;
+}
+
+uint8_t App_Config_LoadFromEEPROM(void)
+{
+    uint8_t frame[CFG_HEADER_LEN + CFG_PAYLOAD_LEN];
+    HAL_StatusTypeDef st = EEPROM_ReadBytes(CFG_EEPROM_ADDR, frame, sizeof(frame));
+    if (st != HAL_OK) return 1u;
+
+    if (frame[0] != CFG_MAGIC_0 || frame[1] != CFG_MAGIC_1) return 2u;
+    if (frame[2] != CFG_VERSION) return 3u;
+
+    uint16_t crc_stored = (uint16_t)frame[3] | ((uint16_t)frame[4] << 8);
+    uint16_t crc_calc   = App_CRC16(&frame[CFG_HEADER_LEN], CFG_PAYLOAD_LEN);
+    if (crc_stored != crc_calc) return 4u;
+
+    Config_Deserialize(&gRadarConfig, &frame[CFG_HEADER_LEN]);
+    /* 加载后同步量程档位 */
+    BSP_Range_SetLevel(App_Config_RangeToLevel(gRadarConfig.rangeSetting));
+    return 0u;
+}
 
 /* 主板侧配置唯一实例 */
 RadarConfig_t gRadarConfig;
@@ -8,6 +146,19 @@ RadarConfig_t gRadarConfig;
 /* 阻尼滤波状态（一阶低通） */
 static float s_damp_filtered = 0.0f;
 static uint8_t s_damp_init   = 0U;
+
+/* 量程设定值（米）→ ADC 采样档位
+ * 每点距离 ≈ 30.1mm（K=79763），1024 点覆盖 30.8m，3×1024=3072 点覆盖 92.4m（含 70m/84m）：
+ *   0~28m  → 档位1(1024点，覆盖30.8m)
+ *   28~56m → 档位2(2048点，覆盖61.6m)
+ *   ≥56m   → 档位3(3072点，覆盖92.4m，含70m/84m)
+ * value<=0（显示板默认"不限制"）按档位1处理，保证上电采样窗口最短。 */
+static uint8_t App_Config_RangeToLevel(float range_m)
+{
+    if (range_m <= 28.0f) return 1U;
+    if (range_m <= 56.0f) return 2U;
+    return 3U;
+}
 
 void App_Config_Init(void)
 {
@@ -31,6 +182,7 @@ void App_Config_Init(void)
     gRadarConfig.scaleUnit      = 0U;
     gRadarConfig.scaleVal       = 0.0f;
     gRadarConfig.rangeSetting   = 0.0f;   /* 0 = 不限制上限 */
+    BSP_Range_SetLevel(1U);                 /* 默认档位1：0~28m，1024 点，S3=36.4ms */
     gRadarConfig.blindZone      = 0.0f;
     gRadarConfig.currMode       = 0U;
     gRadarConfig.currFault      = 0U;
@@ -67,7 +219,12 @@ void App_Config_SetParam(DISP_PARAM_ID id, float value)
         case DPARAM_OUT_MAP:        gRadarConfig.outMap         = (uint8_t)value; break;
         case DPARAM_SCALE_UNIT:     gRadarConfig.scaleUnit      = (uint8_t)value; break;
         case DPARAM_SCALE_VAL:       gRadarConfig.scaleVal       = value; break;
-        case DPARAM_RANGE_SETTING:  gRadarConfig.rangeSetting   = value; break;
+        case DPARAM_RANGE_SETTING:
+            gRadarConfig.rangeSetting = value;
+            /* 量程米值 → 采样档位（1~5）：下一次测量序列起 ADC 点数与 S3 脉宽生效；
+             * 切档后旧空罐基线点数不匹配，算法层会自动重新学习基线 */
+            BSP_Range_SetLevel(App_Config_RangeToLevel(value));
+            break;
         case DPARAM_BLIND_ZONE:     gRadarConfig.blindZone      = value; break;
 
         /* 服务 / 输出 */
@@ -94,6 +251,10 @@ void App_Config_SetParam(DISP_PARAM_ID id, float value)
         default:
             break;
     }
+
+    /* 参数变更后持久化到 EEPROM（24LC256），断电不丢失。
+     * SET_PARAM 由显示板确认键触发，一次确认一次写入，不会频繁磨损。 */
+    App_Config_SaveToEEPROM();
 }
 
 void App_Config_SetStr(DISP_PARAM_ID id, const char *str)
@@ -108,6 +269,9 @@ void App_Config_SetStr(DISP_PARAM_ID id, const char *str)
         default:
             break;
     }
+
+    /* 字符串参数变更后持久化到 EEPROM */
+    (void)App_Config_SaveToEEPROM();
 }
 
 uint8_t App_Config_Reset(uint8_t mode)
@@ -181,6 +345,11 @@ float App_Config_SimDistance(void)
 
 float App_Config_GetSensorTemp(void)
 {
-    /* 占位：返回 25.0℃。待接入 NTC / 内部温度传感器后替换。 */
-    return 25.0f;
+    /* 读取 STLM75M2F 温度传感器；失败时兜底返回 25.0℃ */
+    float temp = 25.0f;
+    if (STLM75_ReadTemp(&temp) != HAL_OK)
+    {
+        temp = 25.0f;
+    }
+    return temp;
 }

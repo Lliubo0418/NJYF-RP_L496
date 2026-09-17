@@ -1,5 +1,5 @@
 #include "app_algorithm.h"
-#include "bsp_timer.h"    /* adc_buf, ADC_SAMPLE_COUNT, BSP_ADCsamp_IsDone */
+#include "bsp_timer.h"    /* adc_buf, ADC_SAMPLE_COUNT_MAX, BSP_Range_GetSampleCount, BSP_ADCsamp_IsDone */
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -25,9 +25,9 @@
  *     使峰位置精度从 ±1 个采样间隔提升到 ±0.1 左右。
  * ============================================================ */
 
-/* ---- 内部静态缓冲区（避免栈溢出，4KB 静态区可接受）---- */
-static float s_smoothed[ADC_SAMPLE_COUNT];    /* Algo_FindPeaks 滑动平均输出缓冲 */
-static float s_measure_sm[ADC_SAMPLE_COUNT];   /* 调用方输入缓冲（存放转成 float 的 ADC 数据或 delta 差分）*/
+/* ---- 内部静态缓冲区（按最大量程档 3072 点静态分配，运行时按当前档位数处理）---- */
+static float s_smoothed[ADC_SAMPLE_COUNT_MAX];    /* Algo_FindPeaks 滑动平均输出缓冲（3072×4B=12KB）*/
+static float s_measure_sm[ADC_SAMPLE_COUNT_MAX];  /* 调用方输入缓冲（ADC 数据或 delta 差分，12KB）*/
 
 /**
   * @brief  滑动平均滤波：对输入序列做奇数窗口滑动平均，抑制高频随机噪声
@@ -35,7 +35,7 @@ static float s_measure_sm[ADC_SAMPLE_COUNT];   /* 调用方输入缓冲（存放
   *         W=7 时 3σ 噪声约降到 1/√7 ≈ 38%，峰幅度几乎不变
   * @param  src   : 输入 float 序列指针（ADC 值或差分信号），不可为 NULL
   * @param  dst   : 输出滤波后 float 数组指针，长度 >= count，调用者保证空间充足
-  * @param  count : 数据点数（本项目固定 1024 = ADC_SAMPLE_COUNT）
+  * @param  count : 数据点数（随量程档位 1024~3072，= BSP_Range_GetSampleCount()）
   * @param  win   : 滑动窗口宽度（必须为奇数，默认 7）；越大越平滑但峰越钝
   * @retval 无（结果写入 dst）
   * @complexity  时间 O(N*W)，空间 O(1) 额外
@@ -193,6 +193,7 @@ uint8_t Algo_FindStrongestPeak(Algo_Peak_t *peak)
     uint8_t    n;
     uint8_t    best;
     uint16_t   i;
+    uint16_t   count;     /* 本次采样点数（随量程档位 1024~3072）*/
 
     if (peak == NULL)
         return 1;
@@ -206,11 +207,14 @@ uint8_t Algo_FindStrongestPeak(Algo_Peak_t *peak)
     if (adc_error)
         return 1;
 
+    /* 本次采样点数随量程档位变化（1024~3072），从 BSP 取生效值 */
+    count = BSP_Range_GetSampleCount();
+
     /* 将 uint16_t adc_buf 转为 float 存入 s_measure_sm，再统一调用 Algo_FindPeaks */
-    for (i = 0; i < ADC_SAMPLE_COUNT; i++)
+    for (i = 0; i < count; i++)
         s_measure_sm[i] = (float)adc_buf[i];
 
-    n = Algo_FindPeaks(s_measure_sm, ADC_SAMPLE_COUNT,
+    n = Algo_FindPeaks(s_measure_sm, count,
                        peaks, ALGO_MAX_PEAKS);
     if (n == 0U)
         return 1;
@@ -255,15 +259,17 @@ void Algo_PrintResult(const Algo_Peak_t *peaks, uint8_t peak_count)
  * ============================================================ */
 
 /* ---- 内部状态 ---- */
-static uint16_t s_baseline[ADC_SAMPLE_COUNT];   /* 虚假回波基线（空罐学习结果）*/
-static uint32_t s_baseline_accum[ADC_SAMPLE_COUNT]; /* 多次平均累加器 */
+static uint16_t s_baseline[ADC_SAMPLE_COUNT_MAX];   /* 虚假回波基线（空罐学习结果，按最大档分配）*/
+static uint32_t s_baseline_accum[ADC_SAMPLE_COUNT_MAX]; /* 多次平均累加器 */
 static uint8_t  s_has_baseline = 0;             /* 1=已学习过基线 */
+static uint16_t s_baseline_count = 0;           /* 基线学习时的采样点数；与当前档位不符则基线失效 */
 static float    s_dist_per_sample = 0.0f;       /* 距离标定：米/采样点 */
 static float    s_zero_offset = 0.0f;           /* 零点偏移：米 */
 
 void Algo_LearnEmptyTank(void)
 {
     uint16_t i;
+    uint16_t count;
 
     if (BSP_ADCsamp_IsDone() == 0U)
         return;
@@ -272,15 +278,18 @@ void Algo_LearnEmptyTank(void)
     if (adc_error)
         return;
 
-    for (i = 0; i < ADC_SAMPLE_COUNT; i++)
+    count = BSP_Range_GetSampleCount();
+    for (i = 0; i < count; i++)
         s_baseline[i] = adc_buf[i];
 
+    s_baseline_count = count;   /* 记录基线对应的档位，切档后 Algo_MeasureDistance 自动重学 */
     s_has_baseline = 1;
 }
 
 void Algo_AccumulateBaseline(void)
 {
     uint16_t i;
+    uint16_t count;
 
     if (BSP_ADCsamp_IsDone() == 0U)
         return;
@@ -289,23 +298,27 @@ void Algo_AccumulateBaseline(void)
     if (adc_error)
         return;
 
-    for (i = 0; i < ADC_SAMPLE_COUNT; i++)
+    count = BSP_Range_GetSampleCount();
+    for (i = 0; i < count; i++)
         s_baseline_accum[i] += adc_buf[i];
 }
 
 void Algo_FinalizeBaseline(uint8_t avg_count)
 {
     uint16_t i;
+    uint16_t count;
 
     if (avg_count == 0U)
         return;
 
-    for (i = 0; i < ADC_SAMPLE_COUNT; i++)
+    count = BSP_Range_GetSampleCount();
+    for (i = 0; i < count; i++)
     {
         s_baseline[i] = (uint16_t)(s_baseline_accum[i] / (uint32_t)avg_count);
         s_baseline_accum[i] = 0U;  /* 清零，为下次学习准备 */
     }
 
+    s_baseline_count = count;
     s_has_baseline = 1;
 }
 
@@ -325,6 +338,7 @@ void Algo_SetBaseline(const uint16_t *baseline)
         return;
 
     memcpy(s_baseline, baseline, sizeof(s_baseline));
+    s_baseline_count = BSP_Range_GetSampleCount();
     s_has_baseline = 1;
 }
 
@@ -352,6 +366,7 @@ uint8_t Algo_MeasureDistance(Algo_RadarResult_t *result)
     uint8_t    best;
     uint8_t    i;
     uint16_t   j;
+    uint16_t   count;     /* 本次采样点数（随量程档位 1024~3072）*/
 
     if (result == (Algo_RadarResult_t *)0)
         return 4;
@@ -366,15 +381,20 @@ uint8_t Algo_MeasureDistance(Algo_RadarResult_t *result)
     if (adc_error)
         return 3;
 
+    /* 量程档位变化后采样点数改变，旧基线已失效：返回 1 由上层自动重新学习空罐基线 */
+    count = BSP_Range_GetSampleCount();
+    if (s_baseline_count != count)
+        return 1;
+
     /* 1. 计算差分信号 delta = adc_buf - baseline，负值截零，存入 s_measure_sm */
-    for (j = 0; j < ADC_SAMPLE_COUNT; j++)
+    for (j = 0; j < count; j++)
     {
         int32_t d = (int32_t)adc_buf[j] - (int32_t)s_baseline[j];
         s_measure_sm[j] = (d > 0) ? (float)d : 0.0f;
     }
 
     /* 2. 统一调用 Algo_FindPeaks（内部 smooth→stats→threshold→localmax→refine）*/
-    n = Algo_FindPeaks(s_measure_sm, ADC_SAMPLE_COUNT, peaks, ALGO_MAX_PEAKS);
+    n = Algo_FindPeaks(s_measure_sm, count, peaks, ALGO_MAX_PEAKS);
     if (n == 0U)
     {
         result->position   = 0.0f;
@@ -425,13 +445,13 @@ void Algo_PrintBaseline(void)
     }
 
     printf("\n===== Baseline (Empty Tank Echo) =====\n");
-    printf("  Count: %u points\n", (unsigned)ADC_SAMPLE_COUNT);
+    printf("  Count: %u points\n", (unsigned)s_baseline_count);
 
     /* 每隔 50 个点打印一次，避免串口刷屏 */
-    for (i = 0U; i < ADC_SAMPLE_COUNT; i += 50U)
+    for (i = 0U; i < s_baseline_count; i += 50U)
     {
         printf("  [%4u] %4u", (unsigned)i, (unsigned)s_baseline[i]);
-        if (i + 50U < ADC_SAMPLE_COUNT)
+        if (i + 50U < s_baseline_count)
             printf("  [%4u] %4u", (unsigned)(i + 25U), (unsigned)s_baseline[i + 25U]);
         printf("\n");
     }

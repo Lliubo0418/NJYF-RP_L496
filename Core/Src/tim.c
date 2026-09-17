@@ -90,9 +90,9 @@ void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 80-1;
+  htim3.Init.Prescaler = 160-1;            /* 0.5MHz，2μs/tick：16位计数可覆盖 131ms（70m档S3结束于107.82ms）*/
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 49999;  /* 50ms@1MHz，覆盖 S3 结束时刻 41.9ms */
+  htim3.Init.Period = 59999;               /* 120ms@0.5MHz，覆盖 70m 档 S3 结束沿 53910 tick */
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
@@ -417,7 +417,7 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* tim_baseHandle)
     __HAL_RCC_TIM7_CLK_ENABLE();
 
     /* TIM7 interrupt Init */
-    HAL_NVIC_SetPriority(TIM7_IRQn, 2, 0);   /* TIM2=0 > TIM3/TIM4=1 > TIM7=2 */
+    HAL_NVIC_SetPriority(TIM7_IRQn, 1, 0);   /* TIM7=1 > USART1=3，采样周期不可被串口打扰 */
     HAL_NVIC_EnableIRQ(TIM7_IRQn);
   /* USER CODE BEGIN TIM7_MspInit 1 */
 
