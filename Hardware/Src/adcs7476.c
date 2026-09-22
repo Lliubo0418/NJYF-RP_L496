@@ -44,8 +44,23 @@ HAL_StatusTypeDef ADCS7476_Read(uint16_t *pValue)
     {
         uint16_t rxData = (uint16_t)*(__IO uint16_t *)&SPI1->DR;
 
-        /* 6. 等 BSY 清零（确保最后一个 SCK 边沿结束）*/
-        while (SPI1->SR & SPI_SR_BSY) { }
+        /* 6. 等 BSY 清零（确保最后一个 SCK 边沿结束）
+         *    超时保护：与上面 RXNE 同级。BSY 长时间不落 ⇒ SPI 时钟/引脚异常
+         *    （时钟树被误改、CS 反相器异常、SCK/MISO 短接等），
+         *    此时必须释放 CS 并返回，绝不能在 16μs 采样 ISR 里裸等。
+         *    2000 次循环 ≈ 250μs@80MHz / 500μs@40MHz，正常路径 BSY 几微秒内
+         *    即清零，循环体一次都不进，时序与原来完全一致。*/
+        timeout = 2000U;
+        while (SPI1->SR & SPI_SR_BSY)
+        {
+            if (--timeout == 0U)
+            {
+                /* BSY 不落，释放 CS 后返回（BSRR 高 16 位 = RESET）*/
+                SPI1_CS_GPIO_Port->BSRR  = (uint32_t)SPI1_CS_Pin  << 16U;
+                ADC_CS_X_GPIO_Port->BSRR = (uint32_t)ADC_CS_X_Pin << 16U;
+                return HAL_TIMEOUT;
+            }
+        }
 
         /* 7. 拉高 CS，结束本次转换（BSRR 高 16 位 = RESET → MCU 端 LOW → 芯片 CS HIGH）*/
         SPI1_CS_GPIO_Port->BSRR  = (uint32_t)SPI1_CS_Pin  << 16U;

@@ -1,4 +1,5 @@
 #include "app_hart.h"
+#include "app_config.h"   /* gRadarConfig.servHART / servHARTAddr（轮询地址来源） */
 #include "bsp_gpio.h"     /* BSP_GPIO_HART_SetTransmit / SetReceive */
 #include "stm32l4xx_hal.h"
 #include <string.h>
@@ -182,6 +183,37 @@ void App_HART_Init(void)
     huart2.Init.HwFlowCtl    = UART_HWCONTROL_NONE;
     huart2.Init.OverSampling = UART_OVERSAMPLING_16;
     HAL_UART_Init(&huart2);
+
+    /* ---- HART 轮询地址：对齐飞卓 p14 §4.6 原文 ----
+     * 飞卓原文：
+     *   "用  键选择标准或多点工作模式。选择标准工作模式时，本机地址被指定为0；
+     *    若选择多点工作模式，按  键，进入地址设置菜单，地址设置为1—15。"
+     *
+     * 显示板 dict_hart = {"标准","多点"}，索引 0 = 标准、1 = 多点，
+     * 与 MENU_HART_MODE 的 min=0/max=1 一致；
+     * servHARTAddr 由 Page_HARTAddr 编辑（min=0/max=15），经 SET_PARAM 上报。
+     *
+     * ★调用时机约束：本函数必须在 App_Config_LoadFromEEPROM() 【之后】执行，
+     *   否则读到的是 App_Config_Init() 的默认值（servHART=0 → 恒为标准模式，
+     *   用户在菜单里选的多点/地址会被开机流程覆盖掉）。
+     *   main.c 中的实际顺序：:131 LoadFromEEPROM → :135 App_HART_Init，
+     *   已满足该约束。若日后调整 init 顺序，此处必须同步复核。
+     *
+     * ★标准模式下【强制 0】：这是协议语义，不是"取用户值再夹取"。
+     *   多点模式下才取 servHARTAddr，并夹取到合法区间 1~15
+     *   （菜单 min 虽为 0，但多点模式地址 0 非法，会把本机从总线上"藏起来"，
+     *     故这里夹到 1；上限 15 同理，防止 EEPROM 残留越界值）。*/
+    if (gRadarConfig.servHART == 1U)   /* 1 = 多点模式 */
+    {
+        uint8_t a = gRadarConfig.servHARTAddr;
+        if (a < 1U)  a = 1U;    /* 多点模式地址下限 1（0 非法） */
+        if (a > 15U) a = 15U;   /* 上限 15（HART 短帧轮询地址范围） */
+        App_HART_SetPollAddr(a);
+    }
+    else                               /* 0 = 标准模式（含未初始化） */
+    {
+        App_HART_SetPollAddr(0U);      /* 标准模式：地址强制为 0 */
+    }
 
     BSP_GPIO_HART_SetReceive();   /* 默认接收模式 */
     s_rxlen = 0U;

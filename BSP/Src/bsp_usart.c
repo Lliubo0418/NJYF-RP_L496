@@ -26,6 +26,15 @@ static UART_HandleTypeDef* const uart_handles[BSP_USART_INSTANCE_MAX] = {
 
 // 存储每个串口的接收回调函数
 static BSP_USART_RxCallback_t rx_callbacks[BSP_USART_INSTANCE_MAX] = {NULL};
+// 记录每个串口单字节接收的缓冲指针，供 ORE 恢复时重启接收
+static uint8_t* s_rx_ptr[BSP_USART_INSTANCE_MAX] = {NULL};
+
+/* DMA 接收：USART1 专用，根治 ORE。
+ * DMA 硬件自动从 RDR 搬字节到缓冲区，不依赖 ISR 实时响应，
+ * TIM7（优先级 1）占满 CPU 时 DMA 照收不误。空闲事件回调里批量投递到上层。 */
+#define BSP_USART1_DMA_RX_BUF_SIZE 128u
+static uint8_t s_dma_rx_buf[BSP_USART1_DMA_RX_BUF_SIZE];
+static uint8_t s_use_dma[BSP_USART_INSTANCE_MAX] = {0};  /* 标记哪些串口用 DMA 接收 */
 
 // -------------------- 内部辅助函数 --------------------
 static BSP_USART_Instance_t GetInstanceFromHandle(UART_HandleTypeDef *huart)
@@ -75,7 +84,17 @@ HAL_StatusTypeDef BSP_USART_Receive_IT(BSP_USART_Instance_t instance, uint8_t *p
     if (instance >= BSP_USART_INSTANCE_MAX || pData == NULL || Size == 0) {
         return HAL_ERROR;
     }
+    s_rx_ptr[instance] = pData;   /* 记录缓冲指针，ORE 恢复时用 */
     return HAL_UART_Receive_IT(uart_handles[instance], pData, Size);
+}
+
+HAL_StatusTypeDef BSP_USART_ReceiveToIdle_DMA(BSP_USART_Instance_t instance)
+{
+    if (instance >= BSP_USART_INSTANCE_MAX) {
+        return HAL_ERROR;
+    }
+    s_use_dma[instance] = 1U;   /* 标记 DMA 模式，错误回调据此选择重启方式 */
+    return HAL_UARTEx_ReceiveToIdle_DMA(uart_handles[instance], s_dma_rx_buf, BSP_USART1_DMA_RX_BUF_SIZE);
 }
 
 HAL_StatusTypeDef BSP_USART_AbortReceive_IT(BSP_USART_Instance_t instance)
@@ -153,3 +172,71 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 // {
 //     // 处理发送完成事件
 // }
+
+// -------------------- DMA + 空闲事件回调 --------------------
+
+/**
+  * @brief  DMA 接收 + 空闲事件回调（由 HAL 库调用）
+  * @note   发送方暂停（IDLE）或 DMA 缓冲满/半满时触发。
+  *         此处把 DMA 缓冲中的字节逐个投递到上层回调（入环形缓冲），
+  *         然后立即重启 DMA 接收下一批。全程不依赖 ISR 实时逐字节响应。
+  * @param  huart: UART 句柄指针
+  * @param  Size: 本次接收到的字节数
+  */
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+{
+    BSP_USART_Instance_t inst = GetInstanceFromHandle(huart);
+    if (inst >= BSP_USART_INSTANCE_MAX) return;
+
+    /* DMA 半传事件（缓冲收到一半，Size=64）：必须直接返回，不投递也不重启。
+     * HAL 在 TOIDLE 模式下半满也会触发本回调；若此时重启 DMA，后半段传输被破坏，
+     * 且前半批字节会在随后的 IDLE/TC 回调中被重复投递。 */
+    if (huart->RxEventType == HAL_UART_RXEVENT_HT)
+    {
+        return;
+    }
+
+    /* IDLE（总线空闲）或 TC（128 字节缓冲满）：把接收到的字节逐个投递到上层
+     * 回调（入环形缓冲），上层在 Disp_Poll 中解析。Size=本次 DMA 传输总字节数 */
+    if (rx_callbacks[inst] != NULL && Size > 0)
+    {
+        uint8_t *p = huart->pRxBuffPtr;
+        for (uint16_t i = 0; i < Size; i++)
+        {
+            rx_callbacks[inst](inst, p[i]);
+        }
+    }
+
+    /* 重启 DMA 接收，等待下一批数据 */
+    HAL_UARTEx_ReceiveToIdle_DMA(huart, s_dma_rx_buf, BSP_USART1_DMA_RX_BUF_SIZE);
+}
+
+/**
+  * @brief  UART 错误回调：处理 ORE/NE/FE/PE 等错误，自动恢复接收
+  * @note   IT 模式的串口（USART2/3/4）清错误后重启单字节 IT 接收；
+  *         DMA 模式的串口（USART1）清错误后重启 DMA 接收。
+  *         根因是优先级抢占导致 ISR 被阻塞；DMA 硬件搬运根治此问题。
+  */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    BSP_USART_Instance_t inst = GetInstanceFromHandle(huart);
+    if (inst >= BSP_USART_INSTANCE_MAX) return;
+
+    /* 清所有错误标志 */
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    huart->ErrorCode = HAL_UART_ERROR_NONE;
+    /* 重置 HAL 状态机，否则后续 Receive 会因 BUSY 返回错误 */
+    huart->gState  = HAL_UART_STATE_READY;
+    huart->RxState = HAL_UART_STATE_READY;
+
+    if (s_use_dma[inst])
+    {
+        /* DMA 模式（USART1）：重启 DMA + 空闲接收 */
+        HAL_UARTEx_ReceiveToIdle_DMA(huart, s_dma_rx_buf, BSP_USART1_DMA_RX_BUF_SIZE);
+    }
+    else if (s_rx_ptr[inst] != NULL)
+    {
+        /* IT 模式（USART2/3/4）：重启单字节 IT 接收 */
+        HAL_UART_Receive_IT(huart, s_rx_ptr[inst], 1);
+    }
+}

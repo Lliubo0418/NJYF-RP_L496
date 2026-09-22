@@ -143,6 +143,14 @@ void Algo_FinalizeBaseline(uint8_t avg_count);
 uint8_t Algo_HasBaseline(void);
 
 /**
+  * @brief  清除已学习的虚假回波基线（对应飞卓"虚假回波 → 删除"）
+  * @note   清零基线数据与 s_has_baseline 标志；此后测量走无基线分支，
+  *         可由算法在下次采样满足条件时自动重学。
+  */
+
+void Algo_ClearBaseline(void);
+
+/**
   * @brief  获取基线数据指针（用于保存到 EEPROM/Flash）
   * @retval 基线数组指针，NULL 表示无基线
   */

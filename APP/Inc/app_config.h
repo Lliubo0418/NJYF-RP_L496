@@ -68,12 +68,19 @@ void App_Config_SetParam(DISP_PARAM_ID id, float value);
 /* 显示板上行写入字符串型参数（当前仅 sensorTag，对应 DPARAM_SENSOR_TAG） */
 void App_Config_SetStr(DISP_PARAM_ID id, const char *str);
 
-/* 复位动作：
- *   mode 与显示板复位选项对齐 —— 0=取消, 1=全部复位(重新学习空罐基线), 2=仅累计流量
- *   返回 0=已执行。累计流量为显示板本地量，此处仅处理空罐基线重学习。 */
+/* 复位动作（语义对齐飞卓 §4.3 + 显示板 dict_reset 的下发值）：
+ *   mode = 1 → 基本复位：仅"基本设置"页参数恢复工厂缺省
+ *   mode = 2 → 工厂设置：全部参数恢复工厂缺省
+ *   mode = 3 → 测量峰值：主板无该状态可清，实为 no-op
+ *   其他值   → 不动作
+ * 返回 0=已执行。
+ * ⚠ 复位【只做复位】，绝不触发空罐基线学习——学习归 App_Config_LearnFalseEcho()。
+ *   （历史缺陷：曾把 mode==1 实现成"学习空罐基线"，造成带料状态下误学习、
+ *     物料回波被永久扣除并写入 EEPROM，导致持续性误测。）*/
 uint8_t App_Config_Reset(uint8_t mode);
 
-/* 虚假回波学习（空罐基线） */
+/* 虚假回波学习（空罐基线）。
+ * 由 DPARAM_SERV_FALSE_ECHO 的"更新/新建"档触发；"删除"档走 Algo_ClearBaseline()。*/
 void App_Config_LearnFalseEcho(void);
 
 /* 量程 + 盲区限幅：

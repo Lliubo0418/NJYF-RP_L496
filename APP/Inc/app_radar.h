@@ -30,8 +30,21 @@ void App_Radar_Init(void);
 
 void App_Radar_Run(void);
 
+/* ===================== 调试标定通道开关 =====================
+ * 打开后主循环调用 App_Debug_Task()，解析 UART4 的 "CAL <dps> <offset>"。
+ *
+ * 【量产固件必须保持注释（即关闭）】理由：
+ *   ① UART4 就是 printf 口，无鉴权 —— 任何接上串口的人都能改测量标定；
+ *   ② 该通道不写 EEPROM，改了也不持久（见 app_radar.c 函数注释）；
+ *   ③ 它会把 sscanf 拖进镜像（栈 264B + microlib 浮点扫描约 900B ROM），
+ *      量产用不到这段代码，白占 Flash 和栈。
+ *
+ * 调试期取消下面这行的注释即可启用。 */
+/* #define DEBUG_CAL_CHANNEL  1 */
+
 /* 调试标定通道：解析 UART4 的 "CAL <dps> <offset>" 命令，调用 Algo_SetCalibration。
- * 仅产线/调试用，与双板串口协议独立。主循环调用。 */
+ * 仅产线/调试用，与双板串口协议独立。主循环在 DEBUG_CAL_CHANNEL 打开时调用。
+ * ⚠ 仅在 DEBUG_CAL_CHANNEL 定义时才需要链接，否则 main.c 不会调用它。 */
 void App_Debug_Task(void);
 
 #ifdef __cplusplus

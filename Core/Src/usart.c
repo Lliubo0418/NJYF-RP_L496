@@ -29,6 +29,9 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 
+/* USART1 RX DMA handle — 用于 DMA + 空闲中断接收，根治 ORE */
+DMA_HandleTypeDef hdma_usart1_rx;
+
 /* UART4 init function */
 void MX_UART4_Init(void)
 {
@@ -228,6 +231,25 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     /* USART1 interrupt Init */
     HAL_NVIC_SetPriority(USART1_IRQn, 3, 0);   /* USART1=3，低于 TIM7(1) 保证采样优先 */
     HAL_NVIC_EnableIRQ(USART1_IRQn);
+
+    /* USART1 RX DMA Init — DMA2_Channel7，CSELR C7S=2 选择 USART1_RX 请求
+     * STM32L496 无 DMAMUX，使用 CSELR 固定映射：DMA2 Ch7/Req2=USART1_RX
+     * （RM0351 DMA2_CSELR C7S：0010=USART1_RX；Req7=TIM8_CH2，切勿混用！）。
+     * 选用 DMA2 避免与 DMA1_Channel5（QSPI）冲突。 */
+    hdma_usart1_rx.Instance = DMA2_Channel7;
+    hdma_usart1_rx.Init.Request = DMA_REQUEST_2;
+    hdma_usart1_rx.Init.Direction = DMA_PERIPH_TO_MEMORY;
+    hdma_usart1_rx.Init.PeriphInc = DMA_PINC_DISABLE;
+    hdma_usart1_rx.Init.MemInc = DMA_MINC_ENABLE;
+    hdma_usart1_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    hdma_usart1_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+    hdma_usart1_rx.Init.Mode = DMA_NORMAL;
+    hdma_usart1_rx.Init.Priority = DMA_PRIORITY_LOW;
+    if (HAL_DMA_Init(&hdma_usart1_rx) != HAL_OK)
+    {
+      Error_Handler();
+    }
+    __HAL_LINKDMA(uartHandle,hdmarx,hdma_usart1_rx);
   /* USER CODE BEGIN USART1_MspInit 1 */
 
   /* USER CODE END USART1_MspInit 1 */

@@ -40,10 +40,22 @@
 /* TIM4 @10MHz (1 tick = 0.1μs) */
 #define S7S9_DELAY_TICK         760U  /* 首脉冲延时：S6↓ + 76μs（规范固定，仅首脉冲）*/
 #define S7S9_REPEAT_DELAY_TICK   40U  /* 连发间隔 4μs：连发不需要 76μs 延时（旧实现误用导致 ~80μs 间隔）*/
-#define S7S9_FINE_PULSE_TICK     20U  /* 精调脉宽 2.0μs（S7/S9 一致）*/
-#define S7S9_WIDE_PULSE_TICK    200U  /* 粗调脉宽 20μs：上电大偏差时快速充电/放电 */
-#define S7S9_MIN_PULSE_TICK      20U  /* 脉宽下限 2.0μs */
-#define S7S9_MAX_PULSE_TICK     200U  /* 脉宽上限 20μs */
+/* ============ S7/S9 校正脉冲脉宽（TIM4 @10MHz，1 tick = 0.1μs）============
+ * ★唯一定义处：其他文件（app_radar.c 的 S7_S9_FINE_US/WIDE_US、bsp_timer.h 注释）
+ *   只准引用"20~40μs"这个结论，不准复述 tick 数值。
+ *
+ * 2026-09-20 修正（§3.10 #C2）：原处遗留一组【旧的 2.0/20μs 定义】被注释掉后
+ *   与当前生效定义并存，极易被误读为"钳位是 2~20μs"。
+ *   ⚠ 若误按旧注释把钳位改回 20~200 ticks：
+ *     · S7_S9_FINE_US(20μs) = 200 ticks 会【正好落在旧上限】被钳成上限值；
+ *     · S7_S9_WIDE_US(40μs) = 400 ticks 直接【超出旧上限】也被钳到 200 ticks；
+ *     ⟹ 粗调与精调【退化成同一个脉宽】，宽脉冲快充/快放的机制完全失效，
+ *        表现为"上电收敛极慢"（历史上出现过 5s 才收敛的故障）。
+ *   故此处删除旧定义，只保留一组生效值。 */
+#define S7S9_FINE_PULSE_TICK     200U  /* 精调脉宽 20μs（S7/S9 一致）*/
+#define S7S9_WIDE_PULSE_TICK    400U  /* 粗调脉宽 40μs：上电大偏差时快速充电/放电 */
+#define S7S9_MIN_PULSE_TICK      200U  /* 脉宽下限 20μs */
+#define S7S9_MAX_PULSE_TICK     400U  /* 脉宽上限 40μs */
 #define S7S9_BATCH_PERIOD_T      2U   /* 批次节流：每 2 个 S6 周期最多一批（样机 91.5ms/批）*/
 
 volatile uint8_t f_ic_sta = 0;
@@ -79,11 +91,6 @@ static volatile uint32_t s6_cycle_cnt   = 0U;     /* S6↑ 周期计数器 */
 static volatile uint32_t s3_next_cycle  = 0U;     /* 下一次允许启动测量的周期序号 */
 static volatile uint8_t  s3_pair_wait   = 0U;     /* 0=下一发是组内第一个 1=组内第二个 */
 static volatile uint32_t s_last_batch_cycle = 0U; /* 最近一批校正所在周期（节流用）*/
-
-/* ============ TIM5 精确定时延 ============ */
-extern TIM_HandleTypeDef htim5;        /* CubeMX 生成（tim.c）*/
-
-
 
 /* ============ TIM7 驱动 ADC 采样状态 ============ */
 extern SPI_HandleTypeDef hspi1;     /* CubeMX 生成（spi.c）*/
@@ -395,8 +402,9 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
         /* 测量序列自动触发：脉宽进入目标窗口、上一轮 ADC 已结束、TIM3 空闲、
          * 到达调度点。在捕获 ISR 内直接启动 BSP_Pulse_Start
          * （S3↑ = 此时刻 + 5.9ms，样机 5.94ms，含 40μs 反应时间裕量），
-         * 不经主循环/TIM5，消除算法处理/调度延迟对 S3 相位的影响。
-         * 注意：目标中心 = 22875μs（22375/23375 ±500）。上电未收敛时实测
+         * 不经主循环，消除算法处理/调度延迟对 S3 相位的影响。
+         * 注意：目标窗口 = [F_IC_LOWER_US, F_IC_UPPER_US]（见 bsp_timer.h，
+         * 2026-09-20 确认 22875~23975，几何中心 23425）。上电未收敛时实测
          * 脉宽可达 ~28.4ms，严禁把阈值改成实测值（那只是尚未充电到位）。 */
         if ((!adc_active) &&
             ((TIM3->CR1 & TIM_CR1_CEN) == 0U) &&
@@ -481,40 +489,12 @@ uint16_t BSP_Range_GetSampleCount(void)
   return adc_target_count;
 }
 
-void BSP_TIM5_Delay_us(uint32_t delay_us)
-{
-  HAL_NVIC_DisableIRQ(TIM5_IRQn);
-
-  /* 停定时器，清标志，清计数器 */
-  __HAL_TIM_DISABLE(&htim5);
-  __HAL_TIM_CLEAR_FLAG(&htim5, TIM_FLAG_UPDATE);
-  __HAL_TIM_SET_COUNTER(&htim5, 0);
-
-  /* 设置延时周期（ARR=delay_us - 1，最小延时 1μs）*/
-  if (delay_us == 0U)
-  {
-    delay_us = 1U;
-  }
-  __HAL_TIM_SET_AUTORELOAD(&htim5, delay_us - 1U);
-
-  /* 重置 HAL 状态，防止返回 BUSY */
-  htim5.State   = HAL_TIM_STATE_READY;
-  htim5.Channel = HAL_TIM_ACTIVE_CHANNEL_CLEARED;
-
-  /* 清标志 + 开溢出中断 + 启动 */
-  __HAL_TIM_CLEAR_FLAG(&htim5, TIM_FLAG_UPDATE);
-  __HAL_TIM_ENABLE_IT(&htim5, TIM_IT_UPDATE);
-  __HAL_TIM_ENABLE(&htim5);
-
-  HAL_NVIC_EnableIRQ(TIM5_IRQn);
-}
-
 uint8_t BSP_ADCsamp_IsDone(void)
 {
   return adc_done;
 }
 
-/* TIM4 / TIM5 / TIM7 溢出中断回调 */
+/* TIM4 / TIM7 溢出中断回调 */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   /* ---------------- TIM4：S7/S9 校正脉冲结束（PWM2 更新中断 = 脉冲结束）---------------- */
@@ -569,15 +549,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     return;
   }
 
-  /* ---------------- TIM5：精确定时延（单次，到点置标志即停）---------------- */
-  if (htim->Instance == TIM5)
-  {
-    __HAL_TIM_DISABLE_IT(htim, TIM_IT_UPDATE);
-    __HAL_TIM_DISABLE(htim);
-    BSP_Pulse_Start();
-    return;
-  }
-
   /* ---------------- TIM7：ADC 采样循环 ---------------- */
   if (htim->Instance != TIM7)
   {
@@ -596,12 +567,43 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
   /* ============ 阻塞版（当前启用）============
    * 单次约 14μs（CS 拉低 + 12.8μs SPI + CS 拉高），TIM7 周期 16μs，余 2μs。
-   * 优先级：TIM2=0 > TIM3/TIM4=1 > TIM7=2，故 TIM3/TIM4 可抢占 TIM7 ISR，
-   *       S3/S4/S7/S9 的时序精度不受 ADC 采样阻塞影响。
-   *       TIM2 IC 优先级更高（0,0）可抢占，不受影响。
-   * 失败保护：连续 ADC_FAIL_MAX 次失败即停 TIM7 + 置 adc_error，避免 ISR 卡死。
-   *           ADCS7476_Read 内部 Timeout=1ms，单次最坏 1ms，连续 3 次 = 3ms，
-   *           远小于 TIM7 整个采样窗（16ms），不会拖垮系统。
+   * 优先级（tim.c 实测，旧注释写"TIM7=2"是错的）：
+   *       TIM2=0；TIM3=1；TIM4=1；TIM7=1 —— TIM7 与 TIM3/TIM4【同级】，
+   *       同级不可互相抢占，只有 TIM2(0) 可抢占它们。
+   *
+   * ★失败保护的正确理解（2026-09-20 修正，勿再按旧注释理解）：
+   *   连续 ADC_FAIL_MAX 次失败即停 TIM7 + 置 adc_error，避免 ISR 卡死 ——
+   *   这一条只保证【不卡死】，【不保证测量仍可信】。
+   *
+   *   旧注释写"ADCS7476_Read 内部 Timeout=1ms"——错。实际是【2000 次轮询循环】
+   *   （adcs7476.c:31 RXNE / :53 BSY），本工程 -O1 下单次约 160μs（150~250μs）。
+   *
+   *   关键后果：这 160μs 全花在 TIM7 的 ISR 里，而 TIM7 照常溢出、
+   *   UIF 是【单标志】（期间溢出的十几次只留 1 个 pending），每次 ISR 又只写
+   *   1 个 adc_buf 槽位 ⇒ 【一次失败白吃 ~10 个采样周期的时间，却只前进 1 个下标】。
+   *   测距依赖"下标 ↔ 时间"线性对应（distance = (peak_idx - tx_offset) × 30.07mm），
+   *   该点之后的下标就都比理想时刻晚了 ~160μs；若失败发生在发射时刻之后、
+   *   回波峰之前，峰会记在偏早 ~10 点的下标上 ⇒ 【距离少算约 30cm】。
+   *   而且这是静默错误：孤立失败不会置 adc_error，测量照样返回成功，只是给错值。
+   *
+   * ⟹ 因此"连续 3 次才报错"这个保护【覆盖不全】：真正需要挡的是【单次】失败。
+   *   这一层由算法层补齐：按"失败点是否位于回波峰之前"做弃用判据（app_algorithm.c）。
+   *
+   * ★决策记录（2026-09-20，用户拍板 → 采用【方案甲】）：
+   *   本层【维持 ADC_FAIL_MAX = 3，不做改动】。三个候选与本层结论：
+   *     甲（已采用）：维持 3，由算法层精确判据弃用。
+   *        ⇒ 失败点落在【回波峰之后】时，该次采样【仍然可用】，可用率最高。
+   *          代价：坏采样会采完才被算法层丢弃，多花一点时间（无功能影响）。
+   *     乙：降到 1，首次失败即停 TIM7 + 置 adc_error。
+   *        ⇒ 故障信号明确（返回 3 而非 4），但会连"失败在峰之后、本可用"的采样一起丢掉。
+   *     丙：失败时把被吃掉的周期数补进 adc_sample_count（跳过槽位填哨兵），
+   *        使 下标↔时间 重新线性。
+   *        ⇒ 最彻底（修好后连插值都可安全使用），但要动 16μs 周期的 ISR，风险最高。
+   *   未采用乙/丙的理由：乙牺牲可用率换来的只是"信号更明确"，而算法层已能区分；
+   *   丙虽最彻底，但要在 TIM7 ISR 内测经过时间，改动风险大于收益。
+   *   ⚠ 甲方案下唯一的遗留副作用：失败点【之后】的时间轴仍然错位，
+   *     这不影响距离（只取峰下标与 tx_offset），但会使【回波曲线后段】出现水平畸变
+   *     （Disp_BuildEchoEx 直接读 adc_buf）。算法层已在该分支打印提示行。
    */
   if (ADCS7476_Read((uint16_t *)&adc_buf[adc_sample_count]) == HAL_OK)
   {
@@ -610,7 +612,37 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   }
   else
   {
-    /* 失败也前进一位（避免卡在坏样本上），写入标记值供算法层识别并跳过 */
+    /* 失败也前进一位（避免卡在坏样本上），写入标记值 0xFFFF 供算法层识别。
+     *
+     * ★哨兵契约（§3.10 #C3，2026-09-20 已闭合）：写 0xFFFF 的同时，
+     *   读取侧必须【全部】做剔除，否则 0xFFFF(65535) 会被当成
+     *   "比 12 位满量程还大 16 倍的真实回波"，后果不是略微失真而是直接测不出：
+     *   分路径看（2026-09-20 修正：早先笼统说"σ 被抬到数千"是不准确的）：
+     *     · 【无基线降级路径】Algo_FindStrongestPeak 直接把 adc_buf 转 float
+     *       送 Algo_FindPeaks → compute_stats 真的会把 σ 抬到数千、阈值 >4095
+     *       → 所有真实峰不达阈值 → 检不到峰。这条成立。
+     *     · 【量产路径】Algo_MeasureDistance 先做 cur-bas 差分写进
+     *       s_measure_sm，哨兵在【进 compute_stats 之前】就已被处理掉，
+     *       ⇒ "σ 爆掉"这条【不成立】，早先的估算是错的。
+     *       该路径真正的危害是：① 基线被永久污染（下条）；② 更根本的是
+     *       【时间轴断裂】——见本函数上方的失败保护说明，一次失败吃掉
+     *       ~10 个采样周期却只前进 1 个下标，会让距离静默少算约 30cm。
+     *     · 三个基线函数：0xFFFF 被永久烧进 s_baseline，
+     *       后续每周期的差分恒为 ≈ -61440 并被截零 → 永久丢点、峰被扣掉；
+     *     · app_disp.c  Disp_BuildCurveNorm：maxv 被抬到 65535
+     *       → 整条回波曲线在屏上压成贴底平线。
+     *   读取侧【均已处理】：插值修补 + 按"失败点是否位于回波峰之前"弃用
+     *   （详见 app_algorithm.c 顶部说明块）。
+     *   日后新增读取 adc_buf 的代码，必须同步处理哨兵。
+     *   ⟹ 若改为其他哨兵值，务必全库 grep 0xFFFF 同步修改读取侧。
+     *
+     *   【另一条写入口：bsp_spi.c:55 —— 当前不可达】adc_buf 还有第二个生产者：
+     *   HAL_SPI_RxCpltCallback 里的 `adc_buf[adc_sample_count] &= 0x0FFFU`（DMA 版）。
+     *   但 DMA 路径整个处于 #if 0（见本文件下方 :616），且唯一把 adc_dma_busy 置 1
+     *   的语句就在该 #if 0 内，故 adc_dma_busy 恒为 0、回调在 :45 立即返回，该写入
+     *   永不执行。⚠ 注意两者语义不同：DMA 版【只掩码不写哨兵】——一旦将来恢复 DMA
+     *   路径，失败样本不会被标记，算法层的剔除逻辑对它将【完全无效】，
+     *   必须同步改造（在 DMA 失败分支补写 0xFFFFU）。*/
     adc_buf[adc_sample_count] = 0xFFFFU;
     adc_sample_count++;
     if (++adc_fail_count >= ADC_FAIL_MAX)

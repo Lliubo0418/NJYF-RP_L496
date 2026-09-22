@@ -54,32 +54,30 @@ extern volatile uint8_t s7_remain;
 extern volatile uint8_t s9_remain;
 
 /* ============ F_IC 目标窗口（μs，单一来源，L496时序.md §4/§6）============
- * 用户确认实测最佳值：LOWER=22875, UPPER=23975（样机对齐效果最好）；
+ * 【唯一定义处 · 其他文件只准引用宏名，不准复述数值】
+ * 2026-09-20 用户确认：窗口 = [22875, 23975]，几何中心 23425，死区宽 1100μs。
+ * 注意 22875 是【下界】，不是中心——旧文档曾把它当中心（那是另一组 22375/23375）。
  * 测量触发窗口再外扩 F_IC_DEADBAND_US。TIM2 S6↑ 捕获 ISR 据此自动启动
  * 测量序列，主循环据此做校正。
- * 注意：上电未收敛时实测脉宽可达 ~28.4ms，严禁把阈值改成实测值。 */
+ * 注意：上电未收敛时实测脉宽可达 ~28.4ms，严禁把阈值改成实测值。
+ *
+ * 验收记录：口径确认 2026-09-20（用户）；如需变更请在此登记日期与确认人。*/
 #define F_IC_LOWER_US        22875U
 #define F_IC_UPPER_US        23975U
 #define F_IC_DEADBAND_US      100U
 #define F_IC_MEAS_LOWER_US   (F_IC_LOWER_US - F_IC_DEADBAND_US)
 #define F_IC_MEAS_UPPER_US   (F_IC_UPPER_US + F_IC_DEADBAND_US)
 
-/* 设置 S7/S9 校正脉冲脉宽（μs，钳位 2~20）：
- * 上电大偏差时用宽脉冲快速充电/放电，接近目标后固定 2μs 精调 */
+/* 设置 S7/S9 校正脉冲脉宽（μs）。
+ * ★钳位范围【唯一定义处】是 bsp_timer.c 的 S7S9_MIN_PULSE_TICK / MAX_PULSE_TICK，
+ *   当前为 200~400 ticks = 【20~40μs】。本文只写结论，不复述 tick 数值。
+ *   ⚠ 历史坑（§3.10 #C2）：bsp_timer.c 里曾遗留一组被注释掉的旧定义
+ *     （2.0μs / 20μs），若误按它把钳位改成 20~200 ticks，则
+ *     精调 20μs 与粗调 40μs 会【双双被钳到同一值】→ 宽脉冲快充机制失效、
+ *     上电收敛极慢。旧定义已删除，改钳位前请先读 bsp_timer.c 处的说明。
+ * 用法：上电大偏差时用 40μs 宽脉冲快速充电/放电，接近目标后切 20μs 精调 */
 void BSP_s7_set_width_us(uint16_t width_us);
 void BSP_s9_set_width_us(uint16_t width_us);
-
-/* ============ TIM5 精确定时延（用于触发 BSP_Pulse_Start 前的延时）============ */
-extern volatile uint8_t tim5_delay_done;   /* 1=TIM5 延时到，可执行 BSP_Pulse_Start */
-
-/**
- * @brief  启动 TIM5 精确定时延时（单次，溢出即停）
- * @param  delay_us  延时微秒（PSC=80-1 → 1μs/tick，最大延时 ≈ 4294s）
- * @note   溢出中断中会置 tim5_delay_done=1 并自动停 TIM5，
- *         应用层检测到标志后需自行清零 tim5_delay_done。
- */
-
-void BSP_TIM5_Delay_us(uint32_t delay_us);
 
 /* ============================================================
  *  TIM7 驱动 ADCS7476 采样（SPI1 + DMA，共 1024~3072 点随量程档位变化）

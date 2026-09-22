@@ -100,3 +100,16 @@ HAL_StatusTypeDef AD5421_ReadFaultRegister(uint16_t *pFaultData)
 {
     return AD5421_ReadRegister(AD5421_CMD_READ_FAULT, pFaultData);
 }
+
+/* 强制输出报警电流。
+ * AD5421 收到 FORCE_ALARM 后按 ALARM_CURRENT_DIRECTION 引脚输出芯片自身的
+ * 低报警(典型 3.2mA) 或 高报警(典型 22.8/24mA，视量程) 电流——这是硬件行为，
+ * 与 DAC 寄存器无关（命令数据位无效）。
+ *
+ * ⚠ 待实测确认：本命令输出的实际 mA 值取决于 RANGE 引脚跳线 + ALARM_CURRENT_DIRECTION
+ *   引脚接法。飞卓文档写的 20.5mA / 22.0mA 与此不一定一致，上线前必须用电流表实测。
+ *   若实测值不符合需求，则改为"DAC 码值 + 实测标定表"方案，不要凭线性外推写死。 */
+HAL_StatusTypeDef AD5421_ForceAlarm(void)
+{
+    return AD5421_WriteRegister(AD5421_CMD_FORCE_ALARM, 0x0000);
+}

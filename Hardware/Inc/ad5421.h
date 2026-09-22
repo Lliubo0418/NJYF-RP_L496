@@ -66,4 +66,37 @@ HAL_StatusTypeDef AD5421_SetDACOutput(uint16_t dacCode);
 
 HAL_StatusTypeDef AD5421_ReadFaultRegister(uint16_t *pFaultData);
 
+/* ============================================================
+ *  4-20mA 电流标定常量（DAC 码值 ↔ 环路电流）
+ *
+ *  AD5421 是 16 位 DAC，环路电流 = F(RANGE 引脚跳线, DAC 码值)。
+ *  量程由芯片 RANGE0/RANGE1 引脚（硬件跳线）选择，软件不可改：
+ *    RANGE1/RANGE0 = COM/COM   → 4 mA ~ 20 mA
+ *    RANGE1/RANGE0 = COM/DVDD  → 3.8 mA ~ 21 mA
+ *    RANGE1/RANGE0 = DVDD/COM  → 3.2 mA ~ 24 mA
+ *  ⚠ 本工程原理图上 RANGE 引脚的实际接法未在代码中体现，
+ *    标定前必须实测确认，否则 mA↔码值 换算全错。
+ *
+ *  ⚠ 报警电流（20.5mA / 22.0mA）不要用 DAC 码值硬凑：
+ *    AD5421 提供硬件级报警命令 AD5421_CMD_FORCE_ALARM(0x06)，
+ *    芯片会按 ALARM_CURRENT_DIRECTION 引脚输出自身的低/高报警电流。
+ *    用 DAC 码值逼近会因为量程不同而算错，且随温度漂移。
+ *
+ *  ⚠ 最小电流 3.8mA（显示板 MENU_CURRENT_MIN 档位 1）无法用当前 4~20mA
+ *    标定的 0..65535 码值表达 —— DAC 0 已经是 4mA 端点，要输出更小的
+ *    3.8mA 需要"小于 0 的码值"，物理上不存在。两条可行路径：
+ *      ① 把 RANGE0/RANGE1 跳线改到 "3.8~21mA" 档（则 3.8mA ↔ DAC 0，
+ *         代价是 20mA 上界跟着变 21mA，需重标整套换算）；
+ *      ② 保持 4~20mA 档，实测确认无法真正到 3.8mA。
+ *    两条路都必须【实测】，不能线性外推。在实测出结果前，
+ *    AD5421_DAC_3P8MA_CALIBRATED 保持【不定义】，app_radar.c 中的
+ *    3.8mA 地板分支不参与编译（currMin 档 1 与档 0 行为一致 = 4mA），
+ *    避免静默输出一个未经验证的错误电流。
+ *    实测完成后：定义 AD5421_DAC_3P8MA_CALIBRATED 并把
+ *    AD5421_DAC_3P8MA 改成实测码值。
+ * ============================================================ */
+/* #define AD5421_DAC_3P8MA_CALIBRATED */   /* ← 实测 3.8mA 码值后取消注释 */
+#define AD5421_DAC_3P8MA            0U      /* ← 占位：待实测替换为真实码值 */
+HAL_StatusTypeDef AD5421_ForceAlarm(void);
+
 #endif

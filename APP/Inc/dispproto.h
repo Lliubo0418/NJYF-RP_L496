@@ -19,6 +19,7 @@
  *     0x03 DIAG  诊断：reliability(u8) status(u8) peakMinEmpty(f32) peakMaxEmpty(f32) temperature(f32) = 14B
  *     0x04 INFO  传感器信息：sensorType(u8) verMajor(u8) verMinor(u8)                        = 3B
  *     0x05 PARAM_DUMP 全量配置：gRadarConfig 序列化（见 DISP_PARAM_DUMP_LEN）              = 变长
+ *     0x06 ECHO_TYPED 带类型标识的曲线帧：curveType(u8) + 128×u8                              = 129B
  *   上行（显示板 -> 主板）
  *     0x81 REQ_ECHO   请求回波帧（无 payload）
  *     0x82 REQ_MEAS   请求测量帧（无 payload）
@@ -41,6 +42,27 @@
 #define DISP_CMD_DIAG      0x03
 #define DISP_CMD_INFO      0x04   /* 传感器信息（主板 -> 显示板） */
 #define DISP_CMD_PARAM_DUMP 0x05  /* 全量配置（主板 -> 显示板） */
+#define DISP_CMD_ECHO_TYPED  0x06   /* 带类型标识的曲线帧（主板 -> 显示板）*/
+
+/* 
+ * 曲线类型（DISP_CMD_ECHO_TYPED 的 payload[0]）
+ *
+ * 【为什么要新开 0x06，而不给 0x02 ECHO 加类型字节】
+ *   0x02 的载荷是 128 字节纯数据、无类型字段，两板各自只有一块
+ *   radar_echo[128] 缓冲。三种曲线（回波/虚假回波/输出走势）如果
+ *   共用同一个命令字，接收端无法分辨这 128 字节属于哪一条，
+ *   会互相覆盖 —— 这正是"曲线标题与内容不符"的根因。
+ *
+ *   但也不能直接把类型字节塞进 0x02 的 payload 头：那是【破坏性
+ *   变更】。两板固件版本不同步时（现场单独升级一块板），旧接收端
+ *   会把类型字节当成第一个数据点，整条曲线右移一格 —— 表现为
+ *   "看起来有曲线但全是错的"，比明显报错更难排查。
+ *   新开命令字则天然向后兼容：旧接收端收到 0x06 直接走 default 丢弃。
+ */
+ 
+#define DISP_CURVE_ECHO      0x01   /* 回波曲线：adc_buf 原始包络 */
+#define DISP_CURVE_FALSE     0x02   /* 虚假回波曲线：空罐学习的基线 */
+/* 0x03 预留给"输出走势曲线"，落地时在此登记 */
 
 /* 上行命令 */
 #define DISP_CMD_REQ_ECHO  0x81
@@ -56,6 +78,7 @@
 #define DISP_MEAS_LEN      14u
 #define DISP_DIAG_LEN      14u   /* reliability(u8) status(u8) peakMinEmpty(f32) peakMaxEmpty(f32) temperature(f32) */
 #define DISP_INFO_LEN      3u    /* sensorType(u8) verMajor(u8) verMinor(u8) */
+#define DISP_ECHO_TYPED_LEN 129u /* curveType(u8) + 128×u8 */
 /* PARAM_DUMP(0x05) 负载为 gRadarConfig 字段按以下固定顺序逐字段 memcpy 序列化
  * （避免结构体 padding 差异，双板必须严格按此顺序读写，共 81 字节）：
  *   [0..3]   lowAdjustPct   (f32)
@@ -92,6 +115,12 @@
 
 /* 协议帧最大长度（含头尾），用于本地缓冲 */
 #define DISP_FRAME_MAX     (2u + 1u + 1u + 255u + 1u)   /* 260 */
+
+/* 单帧 payload 的最大字节数（受 LEN 字段为 u8 限制）。
+ * 接收侧缓冲按此尺寸开辟，新增命令时不必再回头数最长帧。
+ * ★注意：这是【协议允许】的上限，不是当前用到的长度。
+ *   当前最长的是 0x06 ECHO_TYPED = 129。 */
+#define DISP_PAYLOAD_MAX   255u
 
 /* CRC 校验值计算：对 CMD、LEN 及 PAYLOAD 逐字节异或。
  * 发送端把返回值填入帧尾，接收端用同样算法比对以判定帧是否正确。

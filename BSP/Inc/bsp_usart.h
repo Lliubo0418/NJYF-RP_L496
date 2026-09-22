@@ -89,6 +89,17 @@ void BSP_USART_RegisterRxCallback(BSP_USART_Instance_t instance, BSP_USART_RxCal
 
 HAL_StatusTypeDef BSP_USART_AbortReceive_IT(BSP_USART_Instance_t instance);
 
+// DMA + 空闲中断接收（异步，根治 ORE）
+/**
+  * @brief  DMA + 空闲中断接收（仅 USART1 用）
+  * @note   DMA 硬件自动搬字节到缓冲区，不受 ISR 优先级抢占影响。
+  *         发送方暂停时触发空闲事件回调，届时批量投递到上层再重启 DMA。
+  *         缓冲区由 BSP 内部管理，上层无需提供。
+  * @param  instance: 串口实例
+  * @retval HAL 状态
+  */
+HAL_StatusTypeDef BSP_USART_ReceiveToIdle_DMA(BSP_USART_Instance_t instance);
+
 // RS485 收发模式切换（仅对 USART3 有效）
 /**
   * @brief  设置 RS485 为发送模式（仅对 USART3 有效）

@@ -119,6 +119,11 @@
       <TargetDriverDllRegistry>
         <SetRegEntry>
           <Number>0</Number>
+          <Key>DLGUARM</Key>
+          <Name>#</Name>
+        </SetRegEntry>
+        <SetRegEntry>
+          <Number>0</Number>
           <Key>ARMRTXEVENTFLAGS</Key>
           <Name>-L70 -Z18 -C0 -M0 -T1</Name>
         </SetRegEntry>
@@ -163,26 +168,42 @@
           <BreakIfRCount>1</BreakIfRCount>
           <Filename></Filename>
           <ExecCommand></ExecCommand>
-          <Expression></Expression>
+          <Expression>0x00000002</Expression>
         </Bp>
         <Bp>
           <Number>1</Number>
           <Type>0</Type>
-          <LineNumber>69</LineNumber>
+          <LineNumber>214</LineNumber>
           <EnabledFlag>1</EnabledFlag>
-          <Address>134238016</Address>
+          <Address>134233422</Address>
           <ByteObject>0</ByteObject>
           <HtxType>0</HtxType>
           <ManyObjects>0</ManyObjects>
           <SizeOfObject>0</SizeOfObject>
           <BreakByAccess>0</BreakByAccess>
           <BreakIfRCount>1</BreakIfRCount>
-          <Filename>G:\LB\AIworkspace\traework\Code Trae\RD_L496_s_tmp_cubemx_s6 - 鍓湰\BSP\Src\bsp_timer.c</Filename>
+          <Filename>G:\LB\AIworkspace\traework\Code Trae\RD_L496_s_tmp_cubemx_s6 - 鍓湰\APP\Src\app_disp.c</Filename>
           <ExecCommand></ExecCommand>
-          <Expression>\\\../BSP/Src/bsp_timer.c\69</Expression>
+          <Expression>\\RD_L496\../APP/Src/app_disp.c\214</Expression>
         </Bp>
         <Bp>
           <Number>2</Number>
+          <Type>0</Type>
+          <LineNumber>278</LineNumber>
+          <EnabledFlag>1</EnabledFlag>
+          <Address>134233248</Address>
+          <ByteObject>0</ByteObject>
+          <HtxType>0</HtxType>
+          <ManyObjects>0</ManyObjects>
+          <SizeOfObject>0</SizeOfObject>
+          <BreakByAccess>0</BreakByAccess>
+          <BreakIfRCount>1</BreakIfRCount>
+          <Filename>G:\LB\AIworkspace\traework\Code Trae\RD_L496_s_tmp_cubemx_s6 - 鍓湰\APP\Src\app_disp.c</Filename>
+          <ExecCommand></ExecCommand>
+          <Expression>\\RD_L496\../APP/Src/app_disp.c\278</Expression>
+        </Bp>
+        <Bp>
+          <Number>3</Number>
           <Type>0</Type>
           <LineNumber>1</LineNumber>
           <EnabledFlag>1</EnabledFlag>
@@ -213,6 +234,11 @@
           <count>2</count>
           <WinNumber>1</WinNumber>
           <ItemText>pulse_us</ItemText>
+        </Ww>
+        <Ww>
+          <count>3</count>
+          <WinNumber>1</WinNumber>
+          <ItemText>s_diag_rx_bytes</ItemText>
         </Ww>
       </WatchWindow1>
       <Tracepoint>
@@ -765,7 +791,7 @@
       <GroupNumber>5</GroupNumber>
       <FileNumber>39</FileNumber>
       <FileType>1</FileType>
-      <tvExp>1</tvExp>
+      <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
       <PathWithFileName>..\BSP\Src\bsp_timer.c</PathWithFileName>
@@ -889,7 +915,7 @@
 
   <Group>
     <GroupName>App</GroupName>
-    <tvExp>0</tvExp>
+    <tvExp>1</tvExp>
     <tvExpOptDlg>0</tvExpOptDlg>
     <cbSel>0</cbSel>
     <RteFlg>0</RteFlg>
@@ -950,6 +976,18 @@
       <bDave2>0</bDave2>
       <PathWithFileName>..\APP\Src\app_config.c</PathWithFileName>
       <FilenameWithoutPath>app_config.c</FilenameWithoutPath>
+      <RteFlg>0</RteFlg>
+      <bShared>0</bShared>
+    </File>
+    <File>
+      <GroupNumber>8</GroupNumber>
+      <FileNumber>53</FileNumber>
+      <FileType>1</FileType>
+      <tvExp>0</tvExp>
+      <tvExpOptDlg>0</tvExpOptDlg>
+      <bDave2>0</bDave2>
+      <PathWithFileName>..\APP\Src\app_hart.c</PathWithFileName>
+      <FilenameWithoutPath>app_hart.c</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
     </File>

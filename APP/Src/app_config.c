@@ -160,11 +160,16 @@ static uint8_t App_Config_RangeToLevel(float range_m)
     return 3U;
 }
 
-void App_Config_Init(void)
-{
-    memset(&gRadarConfig, 0, sizeof(gRadarConfig));
+/* ---- 默认值加载（拆分：基本 / 全部），供 Init 与"复位"两条路径复用 ----
+ *
+ * 飞卓 §4.3 定义了两级复位：
+ *   基本复位 → 只恢复【基本设置页】参数
+ *   工厂设置 → 恢复【全部参数】
+ * 两者的差别就在于"是否包含服务/输出页与仿真页"。*/
 
-    /* 初值与显示板 RADAR_PARAM 默认一致（见 oled_ui.c UI_Init / 结构体初始化） */
+/* 基本设置页字段恢复工厂缺省（对应飞卓"基本复位"） */
+static void App_Config_LoadDefaultsBasic(void)
+{
     gRadarConfig.lowAdjustPct   = 0.0f;
     gRadarConfig.lowAdjustVal   = 0.0f;
     gRadarConfig.highAdjustPct  = 100.0f;
@@ -174,16 +179,27 @@ void App_Config_Init(void)
     gRadarConfig.matFirstWave   = 1U;
     gRadarConfig.matSurfAngle   = 0U;
     gRadarConfig.matFoamDust    = 0U;
-    gRadarConfig.matSmallDK      = 0U;
+    gRadarConfig.matSmallDK     = 0U;
     gRadarConfig.matPipe        = 0U;
     gRadarConfig.pipeDiameter   = 100.0f;
     gRadarConfig.dampTime       = 0.0f;
     gRadarConfig.outMap         = 0U;
     gRadarConfig.scaleUnit      = 0U;
     gRadarConfig.scaleVal       = 0.0f;
-    gRadarConfig.rangeSetting   = 0.0f;   /* 0 = 不限制上限 */
-    BSP_Range_SetLevel(1U);                 /* 默认档位1：0~28m，1024 点，S3=36.4ms */
+    gRadarConfig.rangeSetting   = 0.0f;
+    BSP_Range_SetLevel(1U);
     gRadarConfig.blindZone      = 0.0f;
+}
+
+/* 全部字段恢复工厂缺省（对应飞卓"工厂设置"）。
+ * 注意：本函数【只恢复配置】，绝不触发空罐基线学习——学习属于
+ * "服务 → 虚假回波"的职责（历史缺陷：曾把学习错放在复位里）。*/
+static void App_Config_LoadDefaults(void)
+{
+    memset(&gRadarConfig, 0, sizeof(gRadarConfig));
+    App_Config_LoadDefaultsBasic();   /* 基本设置页 */
+
+    /* 服务 / 输出页 */
     gRadarConfig.currMode       = 0U;
     gRadarConfig.currFault      = 0U;
     gRadarConfig.currMin        = 0U;
@@ -192,10 +208,19 @@ void App_Config_Init(void)
     gRadarConfig.servHART       = 0U;
     gRadarConfig.servHARTAddr   = 0U;
     gRadarConfig.servOffset     = 0.0f;
-    gRadarConfig.threshEcho     = 0.0f;   /* 0 = 沿用自适应 3σ 阈值 */
+    gRadarConfig.threshEcho     = 0.0f;
     gRadarConfig.threshEnv      = 0.0f;
+
+    /* 仿真 / 标识页 */
     gRadarConfig.diagSim        = 0U;
     strncpy(gRadarConfig.sensorTag, "SENSOR", sizeof(gRadarConfig.sensorTag) - 1);
+
+    s_damp_init = 0U;   /* 清空阻尼历史，避免旧值平滑拖尾 */
+}
+
+void App_Config_Init(void)
+{
+    App_Config_LoadDefaults();   /* 上电初值 = 全部参数的工厂缺省 */
 }
 
 void App_Config_SetParam(DISP_PARAM_ID id, float value)
@@ -244,7 +269,32 @@ void App_Config_SetParam(DISP_PARAM_ID id, float value)
 
         /* 仿真 */
         case DPARAM_DIAG_SIM:       gRadarConfig.diagSim        = (uint8_t)value; break;
-        case DPARAM_SERV_FALSE_ECHO: App_Config_LearnFalseEcho(); break;  /* 触发虚假回波学习 */
+        case DPARAM_SERV_FALSE_ECHO:
+            /* 虚假回波操作档位（对齐飞卓 p11-12 + 显示板 dict_flsEcho）：
+             *   显示板 MENU_SERV_FALSE_ECHO 是 4 选项菜单（删除/更新/新建/编辑），
+             *   min=0/max=3，下发值 = 索引 + 1，故：
+             *     value = 1 → 删除：清除已存基线
+             *     value = 2 → 更新：重新学习（飞卓语义"真实回波之后保持不变"）
+             *     value = 3 → 新建：重新学习（飞卓语义"真实回波之后清零"）
+             *     value = 4 → 编辑：两点+幅度生成曲线
+             *
+             * ⚠ 当前实现状态：2/3 都做"直接学习"（尚未区分"真实回波之后"的分段处理），
+             *   4（编辑）尚未实现。这是分两期的计划——先做 1/2/3，编辑后续补。
+             * ⚠ 历史缺陷：原实现无论收到哪个档位都只做学习，
+             *   导致选"删除"反而去学习基线（语义完全相反）。*/
+            if (value == 1.0f)
+            {
+                Algo_ClearBaseline();          /* 删除 */
+            }
+            else if (value == 2.0f || value == 3.0f)
+            {
+                App_Config_LearnFalseEcho();   /* 更新 / 新建（暂同实现，分段处理待补） */
+            }
+            else
+            {
+                /* value==4（编辑）暂未实现；未知值不动作 */
+            }
+            break;
 
         /* 字符串型不应走这里，忽略 */
         case DPARAM_SENSOR_TAG:
@@ -276,13 +326,39 @@ void App_Config_SetStr(DISP_PARAM_ID id, const char *str)
 
 uint8_t App_Config_Reset(uint8_t mode)
 {
-    /* 复位全部：重新学习空罐基线（当前采样若未完成则等待下一轮采样时由算法自动补学） */
-    if (mode == 1U)
+    /* 复位档位语义：与显示板 MENU_SERV_RESET(dict_reset) 的下发值严格对齐。
+     *   显示板菜单项 min=0/max=2，上报值 = 索引 + 1，故：
+     *     mode = 1 → 基本复位（"基本设置"页参数恢复工厂缺省）
+     *     mode = 2 → 工厂设置（"全部参数"恢复工厂缺省）
+     *     mode = 3 → 测量峰值（清诊断峰值统计）
+     *
+     * ⚠ 历史缺陷（2026-09-20 修正）：原实现把 mode==1 当作"学习空罐基线"，
+     *   而 mode==2/3 全为 no-op ⇒ 三项语义全错，其中"工厂设置"会在带料状态下
+     *   重新学习空罐基线，把物料回波当固定障碍物永久扣除并写 EEPROM，
+     *   造成持续性误测。此处彻底纠正：
+     *   ① 复位只做复位，绝不触发学习；
+     *   ② 空罐基线学习归"服务 → 虚假回波"（DPARAM_SERV_FALSE_ECHO）职责。*/
+    switch (mode)
     {
-        App_Config_LearnFalseEcho();
-        s_damp_init = 0U;   /* 清空阻尼历史，避免旧值平滑拖尾 */
+    case 1U:   /* 基本复位：仅基本设置页字段 */
+        App_Config_LoadDefaultsBasic();
+        break;
+
+    case 2U:   /* 工厂设置：全部参数（含服务/输出、仿真/标识） */
+        App_Config_LoadDefaults();
+        break;
+
+    case 3U:   /* 测量峰值：主板无"测量峰值统计"状态可清，实为 no-op。
+                * 注：显示板的"测量峰值"是 MEAS 帧带来的只读诊断量（peak_count），
+                * 不是主板维护的累加统计，故此处无需动作。
+                * ⚠ 不要在这里调 Algo_ClearBaseline()——那属于"虚假回波→删除"。*/
+        break;
+
+    default:   /* 0 或其他：不动作 */
+        return 0U;
     }
-    /* mode == 2（仅累计流量）为显示板本地量，主板无需动作 */
+
+    (void)App_Config_SaveToEEPROM();   /* 复位结果持久化 */
     return 0U;
 }
 

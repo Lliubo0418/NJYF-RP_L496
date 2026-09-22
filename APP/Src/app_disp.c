@@ -1,13 +1,15 @@
-/* 主板侧：自定义协议发送（下行）+ 上行命令接收解析（预留）
+/* 主板侧：自定义协议下行发送 + 上行命令接收解析。
  *
  * 下行：雷达业务在测距完成后调用 Disp_DownSendMeas() 等把数据发往显示板。
- * 上行：显示板发来的命令（0x81~0x84）经逐字节状态机解析后交给 Disp_OnUp()。
+ * 上行：显示板发来的命令（0x81~0x87）经环形缓冲由 Disp_Poll 出队解析，
+ *       完整帧交给 Disp_OnUplink() 执行具体业务。
  *
- * 注意：L496 的 BSP 层（bsp_usart.c）不在 HAL_UART_RxCpltCallback 内自动重武装，
- *       因此本文件在 Disp_OnRxByte 末尾手动调用 BSP_USART_Receive_IT 重新启动接收。
+ * 接收方式：USART1 使用 DMA + 空闲中断接收（根治 ORE）。
+ *           DMA 硬件自动搬字节到缓冲区，不受 TIM7 优先级抢占影响；
+ *           空闲事件回调批量投递到环形缓冲并自动重启 DMA，本文件无需手动重武装。
  *
- * 设计原则：本文件只做“传输 + 帧解析 + 字段打包”，具体的触发频率、
- *       回波降采样算法、上行命令动作均为预留项，用户按需细化。
+ * 设计原则：本文件只做“传输 + 帧解析 + 字段打包”，测距触发频率在 bsp_timer/app_radar，
+ *       回波降采样算法见 Disp_BuildEcho，参数业务动作在 app_config。
  */
 #include "app_disp.h"
 #include "app_algorithm.h"
@@ -15,6 +17,7 @@
 #include "bsp_timer.h"    /* adc_buf, ADC_SAMPLE_COUNT_MAX, BSP_Range_GetSampleCount */
 #include "bsp_usart.h"
 #include "dispproto.h"
+#include <stdio.h>
 #include <string.h>
 
 /* 最近一次回波缓冲，供 REQ_ECHO 立即回送 */
@@ -22,6 +25,9 @@ static uint8_t s_last_echo[DISP_ECHO_LEN];
 static uint8_t s_last_echo_valid = 0U;
 /* REQ_MEAS 请求标志：置 1 后下一次测量完成补发 MEAS */
 static volatile uint8_t s_meas_req_pending = 0U;
+
+/* 接收诊断：DMA 累计投递字节数（ISR 写），用于判定 RX 硬件链路是否畅通 */
+volatile uint32_t s_diag_rx_bytes = 0U;
 
 /* ---------------- 下行发送 ---------------- */
 
@@ -62,6 +68,15 @@ void Disp_DownSendEcho(const uint8_t *echo128)
     Disp_DownSendFrame(DISP_CMD_ECHO, echo128, DISP_ECHO_LEN);
 }
 
+void Disp_DownSendEchoTyped(uint8_t type, const uint8_t *data128)
+{
+    uint8_t p[DISP_ECHO_TYPED_LEN];
+    if (data128 == 0) return;
+    p[0] = type;
+    memcpy(&p[1], data128, DISP_ECHO_LEN);
+    Disp_DownSendFrame(DISP_CMD_ECHO_TYPED, p, DISP_ECHO_TYPED_LEN);
+}
+
 void Disp_DownSendDiag(uint8_t reliability, uint8_t status, float peakMinEmpty, float peakMaxEmpty, float temperature)
 {
     uint8_t p[DISP_DIAG_LEN];
@@ -91,27 +106,55 @@ void Disp_DownSendParamDump(void)
     Disp_DownSendFrame(DISP_CMD_PARAM_DUMP, buf, 81);
 }
 
-void Disp_BuildEcho(const uint16_t *adc, uint16_t adc_len, uint8_t *out128)
+/* 曲线归一化。
+ * ★哨兵剔除（§3.10 #C3）：源数组可能含 bsp_timer.c:585 写入的 0xFFFF 失败标记。
+ *   若不剔除，会造成两个可见故障：
+ *     ① 自归一化时 maxv 被抬到 65535 → 所有点 ×255/65535 都被压到 0 附近
+ *        → 整条曲线在屏上变成【一条贴底平线】（用户表现为"曲线没了/一片空白"）；
+ *     ② 该点自身也被当成长度 65535 纳秒级最大峰，曲线形状失真。
+ *   这里在取值处把哨兵按 0 处理：既不影响正常点，也不让失败点主导标度。*/
+uint16_t Disp_BuildCurveNorm(const uint16_t *src, uint16_t src_len,
+                             uint16_t norm_peak, uint8_t *out128)
 {
-    if (adc == 0 || out128 == 0 || adc_len == 0u) return;
+    if (src == 0 || out128 == 0 || src_len == 0u) return 0u;
 
-    uint16_t maxv = 0;
-    for (uint16_t i = 0; i < adc_len; i++)
+    /* 归一化除数：调用方给了就用它（曲线间幅度可比）；没给则退回自身峰值 */
+    uint16_t maxv = norm_peak;
+    if (maxv == 0u)
     {
-        if (adc[i] > maxv) maxv = adc[i];
+        for (uint16_t i = 0; i < src_len; i++)
+        {
+            uint16_t v = src[i];
+            if (v == 0xFFFFu) continue;   /* 跳过失败哨兵，不让它决定标度 */
+            if (v > maxv) maxv = v;
+        }
     }
     if (maxv == 0u) maxv = 1u;
 
     for (uint8_t j = 0; j < DISP_ECHO_LEN; j++)
     {
-        uint32_t idx = (uint32_t)j * adc_len / DISP_ECHO_LEN;
-        if (idx >= adc_len) idx = adc_len - 1u;
-        uint32_t v = (uint32_t)adc[idx] * 255u / maxv;
+        uint32_t idx = (uint32_t)j * src_len / DISP_ECHO_LEN;
+        if (idx >= src_len) idx = src_len - 1u;
+        uint16_t s = src[idx];
+        if (s == 0xFFFFu) s = 0u;        /* 失败点按 0 画，避免假尖峰 */
+        uint32_t v = (uint32_t)s * 255u / maxv;
         out128[j] = (uint8_t)(v > 255u ? 255u : v);
     }
+    return maxv;
 }
 
-/* ---------------- 上行命令接收（预留） ---------------- */
+uint16_t Disp_BuildEchoEx(const uint16_t *adc, uint16_t adc_len, uint8_t *out128)
+{
+    /* 传 norm_peak=0 → 用自身峰值归一化，行为与原 Disp_BuildEcho 逐字节一致 */
+    return Disp_BuildCurveNorm(adc, adc_len, 0u, out128);
+}
+
+void Disp_BuildEcho(const uint16_t *adc, uint16_t adc_len, uint8_t *out128)
+{
+    (void)Disp_BuildEchoEx(adc, adc_len, out128);
+}
+
+/* ---------------- 上行命令接收（显示板 -> 主板） ---------------- */
 typedef enum { S_SYNC1=0, S_SYNC2, S_CMD, S_LEN, S_PAYLOAD, S_CRC } DispRxState_t;
 
 static DispRxState_t s_state = S_SYNC1;
@@ -120,7 +163,6 @@ static uint8_t s_len   = 0;
 static uint8_t s_idx   = 0;
 static uint8_t s_crc   = 0;
 static uint8_t s_payload[DISP_ECHO_LEN];
-static uint8_t s_rxbyte;   /* L496 BSP 不自动重武装，这里持有接收缓冲 */
 
 /* 环形缓冲：USART ISR 只入队，主循环 Disp_Poll 出队解析，避免 ISR 内阻塞发送影响采样 */
 #define DISP_RING_SIZE  256u
@@ -146,31 +188,23 @@ static uint8_t Disp_RingGet(uint8_t *b)
     return 1u;
 }
 
-/* 上行命令处理：解析出完整且 CRC 正确的上行帧后，把命令与负载交给 Disp_OnUplink() 钩子。
- * 具体动作由用户在 Disp_OnUplink 中按需实现。
+/* 上行命令分发：解析出完整且 CRC 正确的上行帧后，交给 Disp_OnUplink() 执行业务。
  * 参数：
- *   cmd     - 上行命令字（DISP_CMD_REQ_ECHO / REQ_MEAS / KEY / SET_PARAM）
+ *   cmd     - 上行命令字（0x81~0x87，见 dispproto.h）
  *   payload - 负载数据指针
  *   len     - 负载字节数 */
 static void Disp_HandleUplink(uint8_t cmd, const uint8_t *payload, uint8_t len)
 {
-    /* TODO(用户实现)：处理显示板发来的命令
-     *   0x81 REQ_ECHO  -> 触发一次 Disp_DownSendEcho(...)
-     *   0x82 REQ_MEAS  -> 触发一次 Disp_DownSendMeas(...)
-     *   0x83 KEY       -> payload[0]=键码，可转发给雷达业务
-     *   0x84 SET_PARAM -> payload[0]=id, payload[1..4]=float value
-     */
-
-    Disp_OnUplink(cmd, payload, len);   /* 预留钩子 */
+    Disp_OnUplink(cmd, payload, len);
 }
 
-/* 逐字节接收回调（USART1 ISR 上下文）：仅入环形缓冲，不做帧解析/发送，
+/* 批量接收回调（DMA 空闲事件 ISR 上下文）：把 DMA 缓冲中的字节逐个入环形缓冲。
+ * DMA 自动重启在 BSP 层 HAL_UARTEx_RxEventCallback 完成，本函数无需手动重武装。
  * 保证采样定时器（TIM7，优先级更高）不被串口阻塞。完整帧解析在 Disp_Poll 中完成。 */
 void Disp_OnRxByte(BSP_USART_Instance_t instance, uint8_t b)
 {
+    s_diag_rx_bytes++;
     Disp_RingPut(b);
-    /* L496 BSP 层不在回调里重武装，这里手动重新启动接收 */
-    BSP_USART_Receive_IT(instance, &s_rxbyte, 1);
 }
 
 /* 单字节状态机推进：由 Disp_Poll 在主循环调用。 */
@@ -216,10 +250,24 @@ void Disp_Poll(void)
     {
         Disp_RxProcessByte(b);
     }
+
+    /* 诊断：每 1s 上报 DMA 累计接收字节数，判定 RX 硬件链路：
+     *   数字增长 → DMA 在收；一直为 0 → DMA/CSELR/接线问题 */
+    {
+        static uint32_t s_last_diag_ms = 0U;
+        uint32_t now = HAL_GetTick();
+        if ((now - s_last_diag_ms) >= 1000U)
+        {
+            s_last_diag_ms = now;
+            printf("[DISP] rx_bytes=%lu\r\n", (unsigned long)s_diag_rx_bytes);
+        }
+    }
 }
 
 void Disp_OnUplink(uint8_t cmd, const uint8_t *payload, uint8_t len)
 {
+    /* 本函数运行在主循环上下文（Disp_Poll 同步调用），printf 安全 */
+    printf("[DISP] uplink cmd=0x%02X len=%u\r\n", cmd, (unsigned)len);
     switch (cmd)
     {
         case DISP_CMD_REQ_ECHO:
@@ -309,5 +357,6 @@ uint8_t Disp_ConsumeMeasReq(void)
 void Disp_Init(void)
 {
     BSP_USART_RegisterRxCallback(BSP_USART_INSTANCE_1, Disp_OnRxByte);
-    BSP_USART_Receive_IT(BSP_USART_INSTANCE_1, &s_rxbyte, 1);
+    /* DMA + 空闲中断接收：硬件自动搬字节，不受 TIM7 优先级抢占影响，根治 ORE */
+    BSP_USART_ReceiveToIdle_DMA(BSP_USART_INSTANCE_1);
 }

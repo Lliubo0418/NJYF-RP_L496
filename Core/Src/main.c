@@ -122,7 +122,6 @@ int main(void)
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
   MX_TIM7_Init();
-  MX_TIM5_Init();
   MX_TIM8_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);
@@ -134,6 +133,11 @@ int main(void)
   AD5421_Init();                 /* 4-20mA DAC 初始化 */
   Disp_Init();   /* 注册 USART1 上行命令回调并启动接收（预留） */
   App_HART_Init();               /* HART 从机初始化（USART2 1200 8O1） */
+
+  /* 注：此处原有开机主动发一帧 PARAM_DUMP(0x05) 的链路自测代码，已删除。
+   * 删除理由（§3.10 #C1）：① 该帧注释自述"排查完删除"，属调试残留；
+   *   ② 显示板已有 Disp_UpRequestParamDump() 主动拉取（app_disp.c:245），
+   *      开机这帧是重复的；③ 它带着 HAL_Delay(100) 阻塞启动路径。*/
 
   // Test_STLM75M2F();
   // Test_24LC256();
@@ -153,7 +157,9 @@ int main(void)
     /* USER CODE BEGIN 3 */
 		Disp_Poll();          /* 处理显示板上行帧（主循环，不阻塞采样） */
 		App_HART_Task();      /* HART 从机收发 */
-		App_Debug_Task();     /* 调试标定通道（UART4 CAL 命令） */
+#ifdef DEBUG_CAL_CHANNEL
+		App_Debug_Task();     /* 调试标定通道（UART4 CAL 命令）；量产默认关闭 */
+#endif
 		App_Radar_Run();
 
 //     HAL_Delay(100);
