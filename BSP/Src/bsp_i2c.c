@@ -27,8 +27,7 @@ HAL_StatusTypeDef BSP_I2C_Read(uint16_t DevAddr, uint16_t MemAddr, uint16_t MemA
 // }
 HAL_StatusTypeDef BSP_I2C_IsDeviceReady(uint16_t DevAddr, uint32_t Trials, uint32_t Timeout)
 {
-    /* 仅返回状态，不打印。
-       该函数也用于 24LC256 写完成 ACK 轮询（器件写周期内 NACK 属正常），
-       打印会造成刷屏；是否报错由调用方决定。*/
+    /* ⚠ 不打印：本函数也用于 24LC256 写周期 ACK 轮询（期间 NACK 属正常），打印会刷屏；
+       是否报错由调用方决定。*/
     return HAL_I2C_IsDeviceReady(&hi2c1, DevAddr, Trials, Timeout);
 }

@@ -34,10 +34,8 @@ HAL_StatusTypeDef BSP_SPI_TransmitReceive_DMA(SPI_HandleTypeDef *hspi, uint8_t *
 
 /**
   * @brief  SPI DMA 接收完成回调
-  * @note   TIM7 驱动的 ADCS7476 采样流程在此收尾：
-  *         - 拉高 CS，结束本次转换
-  *         - 提取 12-bit 有效数据
-  *         - 计数 +1，满目标点数停止 TIM7
+  * @note   TIM7 驱动的 ADCS7476 采样流程在此收尾：拉高 CS、提取 12-bit 有效数据、
+  *         计数 +1，满目标点数停止 TIM7。
   */
 void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
 {
@@ -55,7 +53,7 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
     adc_buf[adc_sample_count] &= 0x0FFFU;
     adc_sample_count++;
 
-    /* 采满本档位目标点数（1024~3072）：停止 TIM7 */
+    /* 采满本档位目标点数（1024~5120）：停止 TIM7 */
     if (adc_sample_count >= adc_target_count)
     {
         __HAL_TIM_DISABLE_IT(&htim7, TIM_IT_UPDATE);

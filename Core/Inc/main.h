@@ -59,10 +59,10 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define IO1_Pin GPIO_PIN_0
 #define IO1_GPIO_Port GPIOC
-#define IO2_Pin GPIO_PIN_1
-#define IO2_GPIO_Port GPIOC
-#define IO3_Pin GPIO_PIN_2
+#define IO3_Pin GPIO_PIN_1
 #define IO3_GPIO_Port GPIOC
+#define IO4_Pin GPIO_PIN_2
+#define IO4_GPIO_Port GPIOC
 #define S5_EN_Pin GPIO_PIN_3
 #define S5_EN_GPIO_Port GPIOC
 #define HART_TX_Pin GPIO_PIN_2

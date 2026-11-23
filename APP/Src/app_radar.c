@@ -12,17 +12,15 @@
 #include <stdio.h>
 #include <string.h>
 
-/* F_IC 阈值唯一定义在 bsp_timer.h（F_IC_LOWER_US / F_IC_UPPER_US），
- * 本文不再复述具体数值，避免"改一处忘一处"。
- * 2026-09-20 口径确认：下界 22875 / 上界 23975（几何中心 23425，死区 [22875,23975]）。
- * 测量序列的启动在 TIM2 S6↑ 捕获 ISR（见 bsp_timer.c），主循环只做校正。 */
+/* 窗口阈值唯一定义在 bsp_timer.h（S6 周期窗 F_IC_PERIOD_LOWER_US / F_IC_PERIOD_UPPER_US），
+ * 本文不复述数值。测量序列的启动在 TIM2 S6↑ 捕获 ISR（见 bsp_timer.c），主循环只做校正。
+ * ★ 2026-10-13：S7/S9 校正的被控量由【S6 低电平宽度】改为【S6 周期】
+ *   （TIM2 改测上升沿→上升沿；K = f_T × 周期）。低电平窗同日退役。 */
 #define F_IC_CENTER_US ((F_IC_LOWER_US + F_IC_UPPER_US) / 2U)
 
-/* 宽脉冲粗调：误差 ≥ F_IC_WIDE_TH_US 时用 S7_S9_WIDE_US(40μs) 宽脉冲加快上电充电/放电，
- * 否则用 S7_S9_FINE_US(20μs) 精调。实时按 error 切换，不锁存——过冲到 >400μs
- * 自动切回粗调快速回拉，避免锁死后精调区卡死震荡（曾出现 5s 才收敛的故障）。
- * 注意：bsp_timer.c 的 S7S9_MIN/MAX_PULSE_TICK 钳位范围为 20~40μs（200~400 ticks），
- *       故 WIDE_US/FINE_US 必须落在该范围内，否则会被钳位失效。 */
+/* 宽脉冲粗调：error ≥ F_IC_WIDE_TH_US 用 S7_S9_WIDE_US(40μs)，否则用 S7_S9_FINE_US(20μs)。
+ * ⚠ 实时按 error 切换、不锁存（锁存会在精调区卡死震荡），且两者必须落在
+ *   bsp_timer.c 的 S7S9_MIN/MAX_PULSE_TICK 钳位范围 20~40μs 内，否则会被钳位失效。 */
 #define F_IC_WIDE_TH_US 400U
 #define S7_S9_WIDE_US  40U   /* 粗调 40μs（对应 bsp_timer.c 400 ticks） */
 #define S7_S9_FINE_US  20U   /* 精调 20μs（对应 bsp_timer.c 200 ticks） */
@@ -38,15 +36,13 @@
 uint32_t pulse_us; // temp
 
 /**
- * @brief  根据脉宽偏差量分段决定 S7/S9 校正脉冲个数
- * @note   偏差越大脉冲越多，实现非线性收敛（与下方实现一一对应）：
- *         <50μs→2, <100μs→4, <400μs→8, <1200μs→16, >=1200μs→50
- * @param  error_us : 当前脉宽与目标窗口边界的偏差（微秒）。
- *                   S9 路径 = F_IC_LOWER_US - pulse_us（距下界）；
- *                   S7 路径 = pulse_us - F_IC_UPPER_US（距上界）。
- *                   注意不是"与中心 23425 的偏差"——用中心会让误差恒 ≥550，
- *                   导致粗调恒锁存（历史故障，见代码阅读指南 §4）。
- * @retval 脉冲个数（2/4/8/16/50）
+ * @brief  根据被控量偏差分段决定 S7/S9 校正脉冲个数
+ * @note   偏差越大脉冲越多，实现非线性收敛
+ * @param  error_us : 距目标窗口边界的偏差
+ *                   ★ 2026-10-13 起为【S6 周期】偏差：
+ *                     S9 = F_IC_PERIOD_LOWER_US - period_us；S7 = period_us - F_IC_PERIOD_UPPER_US
+ *                   ⚠ 不可改为"与窗口中心的偏差"：误差会恒 ≥ 半窗宽，导致粗调恒锁存（粗调区永不退出）
+ * @retval 脉冲个数
  * @complexity  时间 O(1) 固定4级比较，空间 O(1)
  */
 static uint8_t Radar_GetPulseCount(uint32_t error_us)
@@ -77,58 +73,181 @@ static uint8_t Radar_GetPulseCount(uint32_t error_us)
 static uint8_t s_sample_consumed = 0U;   /* 当前采样是否已跑过算法 */
 static Algo_RadarResult_t s_last_result; /* 最近一次测量结果，供调试查看 */
 
-/* 显示板 REQ_MEAS / KEY(K1) 请求即使在测量失败时也必须闭环回复：
- * 回一帧全零（peak_count=0）的无效 MEAS，避免一直无回波时显示板永久等待（死锁）。
- * 成功路径在 App_Radar_ProcessSample 末尾用真实帧回复并消费标志，不走这里。 */
+/* ⚠ 显示板 REQ_MEAS / KEY(K1) 在测量失败时也必须回一帧全零（peak_count=0）的 MEAS，
+ * 否则无回波时显示板会永久等待（死锁）。成功路径在 App_Radar_ProcessSample 末尾用真实帧回复。 */
 static void App_Radar_ReplyMeasIfFailed(void)
 {
-    if (Disp_ConsumeMeasReq())
+    if (Disp_RecvTakeMeasReq())
     {
         Algo_RadarResult_t invalid;
         memset(&invalid, 0, sizeof(invalid));
-        Disp_DownSendMeas(&invalid, 0U);
+        Disp_SendMeas(&invalid, 0U);
         printf("[RADAR] REQ_MEAS replied: invalid measurement (peak_count=0)\r\n");
+    }
+}
+
+/**
+  * @brief  写 4-20mA 输出（有效测量走线性映射，无效测量走 currFault 故障档）
+  * @param  meas_valid : 1=本次测量有效（distance 可信）；0=无效（无回波 / 采样错误 / 零点漏捕）
+  * @note   ★ 2026-10-27：原实现把这段逻辑内联在 App_Radar_ProcessSample 的 ret==0 分支里，
+  *         导致【失败路径完全不碰 DAC】—— 一旦测量持续失败（含 R-13 修好后的"零点漏捕"），
+  *         电流会永久冻结在最后一个有效值，currFault 配置的报警档形同虚设。
+  *         现抽成独立函数，失败分支也必须调用（meas_valid=0）。
+  *         ⚠ 默认配置 currFault=0（无变化）时本函数在失败分支不写 DAC，行为与旧版完全一致，
+  *           所以这次重构对出厂默认没有任何行为改变。
+  * @complexity 时间 O(1)（currFault=1/2 时含一次 AD5421 报警指令），空间 O(1)
+  */
+static void App_Radar_ApplyCurrentOut(uint8_t meas_valid)
+{
+    uint16_t dac = 0U;
+    uint8_t  skip_dac = 0U;   /* 1=本次不重写 DAC（故障档"无变化"/硬件报警已验证）*/
+
+    if (meas_valid != 0U)
+    {
+        float lo = gRadarConfig.lowAdjustVal;
+        float hi = gRadarConfig.highAdjustVal;
+        float span = hi - lo;
+        float d = s_last_result.distance;
+        if (span <= 0.0f)
+            span = 1.0f;
+        if (d <= lo)
+            dac = 0U;
+        else if (d >= hi)
+            dac = 65535U;
+        else
+            dac = (uint16_t)((d - lo) / span * 65535.0f);
+
+        /* ---- currMode：4~20mA / 20~4mA 反作用（对齐飞卓 p12 §4.2）----
+         * 显示板 dict_currMode 索引 0=正作用(默认)、1=反作用，与 MENU_CURRENT_MODE min/max=0/1 一致。
+         * ⚠ 反作用字段是 currMode，不是 outMap（outMap 是"容器形状→体积映射"，属算法层）。
+         * ⚠ 只对【有效测量的线性映射段】生效，不影响故障电流分支（走 skip_dac / AD5421_ForceAlarm）。
+         * ⚠ 上线前必须"已知料位→测电流"双向验证：接反则低料位读 20mA，易被误判为传感器故障。*/
+        if (gRadarConfig.currMode == 1U)   /* 1 = 20~4mA 反作用 */
+        {
+            dac = (uint16_t)(65535U - dac);
+        }
+    }
+    else
+    {
+        /* 无效测量：故障电流档 currFault（对齐飞卓 p13 §4.2）：
+         *   0=无变化（保持上次输出）；1=20.5mA、2=22.0mA 高报警。
+         * ⚠ 20.5/22.0mA 超出 4~20mA 满码 20.0mA，必须走 AD5421_ForceAlarm() 硬件通路；上线前须实测三档。
+         * ⚠ 用 skip_dac 而非 return，避免函数末尾收尾代码被静默跳过。*/
+        switch (gRadarConfig.currFault)
+        {
+        case 0U:
+            skip_dac = 1U;                       /* 无变化：保持上一次输出 */
+            break;
+        case 1U:
+            (void)AD5421_ForceAlarm();           /* 高报警档1 */
+            skip_dac = 1U;
+            break;
+        case 2U:
+            (void)AD5421_ForceAlarm();           /* 高报警档2 */
+            skip_dac = 1U;
+            break;
+        default:
+            skip_dac = 1U;                       /* 未知档：保持，不输出未定义电流 */
+            break;
+        }
+    }
+    if (skip_dac == 0U)
+    {
+        /* ---- currMin：最小电流下界（4mA / 3.8mA，对齐飞卓 p13 §4.2）----
+         * 显示板 dict_minCurr 索引 0=4mA、1=3.8mA，与 MENU_CURRENT_MIN min/max=0/1 一致。
+         * 语义：抑制"料位低于低位调整点"时电流继续下探的地板；d<=lo 时已钳到 DAC=0（=4mA）。
+         * ⚠ 未闭合项：3.8mA 在现行标定（lowAdjustVal→DAC 0 = 4mA）下无法用 0..65535 码值表达，
+         *   须先把 AD5421 RANGE0/RANGE1 跳线改到 "3.8~21mA" 档（上界随之变 21mA）并实测；
+         *   故此处只留占位宏 + 显式告警：实测前 currMin==1 与 0 行为一致（都是 4mA）。*/
+#if defined(AD5421_DAC_3P8MA_CALIBRATED)
+        if (gRadarConfig.currMin == 1U)
+        {
+            dac = AD5421_DAC_3P8MA;   /* 3.8mA 地板（实测标定值，见宏定义处）*/
+        }
+#endif
+        /* currMin == 0（4mA）：dac 已钳在 >= 0，无需修改 */
+        AD5421_SetDACOutput(dac);
     }
 }
 
 /**
  * @brief  对"已采满"的 adc_buf 运行滤波 + 回波发现测距
  * @note   仅当 BSP_ADCsamp_IsDone()==1 时调用（adc_buf 已稳定，无 ISR 竞争）
- *         流程：Algo_MeasureDistance → 处理返回码（无基线则自动学习空罐基线）
- *         → 成功则 printf 调试 + Disp_DownSendMeas 经 USART1 下发显示板
  * @retval 无（结果存入 s_last_result，副作用为串口输出 + 下行帧发送）
  * @complexity  时间 O(N*W)（由 Algo_MeasureDistance 主导），空间 O(N) 栈
  */
 static void App_Radar_ProcessSample(void)
 {
+    /* ---- 空罐基线【多帧学习】会话：每完成一次采样推一拍 ----
+     * 放在测距之前：Algo_MeasureDistance 会改写 adc_buf 里的哨兵点（Algo_FixupSentinelU16），
+     * 学习要的是"本帧原始数据"，先喂更干净。
+     * ⚠ 学完才落盘：每帧都写会白写 8 次 10 KB（R-07：单次写入阻塞 0.88~1.6 s）。*/
+    if (Algo_LearnIsActive())
+    {
+        uint8_t ls = Algo_LearnTick();
+        if (ls == 1U)
+        {
+            uint8_t e = App_Config_SaveBaselineToEEPROM();
+            printf("[RADAR] baseline learned (%u frames) & saved: eeprom=%u\r\n",
+                   (unsigned)Algo_LearnProgress(), (unsigned)e);
+        }
+        else if (ls == 2U)
+        {
+            printf("[RADAR] baseline learn FAILED - old baseline kept\r\n");
+        }
+    }
+
     uint8_t ret = Algo_MeasureDistance(&s_last_result);
 
     if (ret == 1U)
     {
-        /* 无基线（首次上电）或档位变化：以当前空罐采样学习虚假回波基线，
-         * 下一轮采样起按 adc-baseline 差分测距。
-         * 也可由显示板 DPARAM_SERV_FALSE_ECHO 触发 App_Config 主动重学。*/
-        Algo_LearnEmptyTank();
-        printf("[RADAR] no baseline -> learned empty-tank baseline; distance from next cycle\r\n");
+        /* ★ 2026-10-29：取消「无基线 / 切档时自动学习」。
+         *   基线只有两个来源：① 上电从 EEPROM 导入；② 显示板「服务 → 虚假回波 → 新建/更新」
+         *   手动触发多帧学习（Algo_LearnBegin，唯一调用点 App_Config_LearnFalseEcho）。
+         *   不做自动学习：无法确认「此刻罐是空的」，有料时会把料面学成背景、此后差分一直减掉
+         *   真实回波 —— 距离静默错误且不报警，比测不到更危险（R-04 只兜住点数变化那一半）。
+         *   ⇒ 没基线就明确不测，强制操作人先确认空罐再手动学。
+         *   ⚠ 学习会话进行中不打这条：那段时间注定没基线，每帧打一遍会刷屏。 */
+        if (Algo_LearnIsActive() == 0U)
+        {
+            printf("[RADAR] no baseline (or range changed): measurement SUPPRESSED. "
+                   "Learn it first: menu Service > False Echo > New/Update\r\n");
+        }
         App_Radar_ReplyMeasIfFailed();
+        App_Radar_ApplyCurrentOut(0U);   /* 无效测量 → currFault 故障档（默认 0=保持，行为不变）*/
         return;
     }
     if (ret == 2U)
     {
         printf("[RADAR] sample not done (unexpected)\r\n");
         App_Radar_ReplyMeasIfFailed();
+        App_Radar_ApplyCurrentOut(0U);
         return;
     }
     if (ret == 3U)
     {
-        printf("[RADAR] sample error (adc_error=1)\r\n");
+        /* ★ 2026-10-27 修 R-13：区分「零点漏捕」与「ADC 连续失败」——两者 adc_error 都为 1，
+         *   但前者是 S6↓ 没进来（查占空比突变 / S6 硬件），后者是 SPI/ADC 坏了（查接线/供电）。
+         *   ⚠ 这条日志是 R-13 唯一可现场定位的线索：修复后此故障不再表现为"假距离"，
+         *     而是表现为"测量停更 + 电流按 currFault 走"，否则无法与其它失败区分。*/
+        if (adc_lead_expired)
+        {
+            printf("[RADAR] zero-cross MISSED (adc_lead_expired=1): S6 falling edge not captured "
+                   "within lead window -> sample discarded (was: silent 37~50m fake distance)\r\n");
+        }
+        else
+        {
+            printf("[RADAR] sample error (adc_error=1)\r\n");
+        }
         App_Radar_ReplyMeasIfFailed();
+        App_Radar_ApplyCurrentOut(0U);
         return;
     }
     if (ret == 4U)
     {
         printf("[RADAR] no echo detected (ret=4)\r\n");
         App_Radar_ReplyMeasIfFailed();
+        App_Radar_ApplyCurrentOut(0U);
         return;
     }
 
@@ -148,37 +267,51 @@ static void App_Radar_ProcessSample(void)
     s_last_result.distance = App_Config_ApplyRange(s_last_result.distance);
     s_last_result.distance = App_Config_ApplyDamping(s_last_result.distance);
 
+    /* ★ 2026-10-29：把「距离偏量」(servOffset) 真正接到测距出口。
+     *   此前该参数只被「存」——结构体字段、EEPROM 序列化、SetParam 赋值、显示板菜单，
+     *   主控与显示板【都没有任何消费点】⇒ 菜单里改它照样回 SAVED OK，读数一毫米不变。
+     *   语义与显示板菜单一致：菜单填的是「直接加到测量值上的修正量」，
+     *   即读数偏高 0.85 m 就填 -0.85，所以这里是【加法】不是减法。
+     *   位置放在 ApplyDamping 之后：常数在滤波前后减数学等价（filter(x-c)=filter(x)-c），
+     *   放后面不影响盲区/量程夹取，且能让 4-20mA、HART PV、显示板、上位机四条路一致。
+     *   负值截 0：菜单范围 ±10 m，偏量可能大于实测距离，负距离对下游无意义。 */
+    s_last_result.distance += gRadarConfig.servOffset;
+    if (s_last_result.distance < 0.0f)
+        s_last_result.distance = 0.0f;
+
     /* 更新 HART 主变量（PV = 物位/距离） */
     App_HART_SetPV(s_last_result.distance);
 
-    /* ===== 协议发送接入点 =====
-     * MEAS 已自动下发；回波/诊断已接入。 */
-    Disp_DownSendMeas(&s_last_result, (tx_sample_valid ? 1U : 0U));
+    /* ===== 协议发送接入点（MEAS / 回波 / 诊断） ===== */
+    Disp_SendMeas(&s_last_result, (tx_sample_valid ? 1U : 0U));
     /* 本轮 MEAS 即对 REQ_MEAS / KEY=0x01 的响应，消费补发标志 */
-    (void)Disp_ConsumeMeasReq();
+    (void)Disp_RecvTakeMeasReq();
 
-    /* 回波包络：按比例从 adc_buf 抽点归一化为 128 点下行（R4 修复） */
+    /* 回波包络：★ 从测距零点 adc_buf[tx_sample_offset] 起取，按比例抽点归一化为 128 点下行。
+     * ⚠ 2026-10-14：零点由 S6↓ 捕获实时触发 ⇒ tx_sample_offset 常态 = 0；仍按它对齐是为了
+     *   兜住「捕获被漏掉」的降级路径。可用点数 = N − offset。 */
     {
         static uint8_t echo128[DISP_ECHO_LEN];
-        uint16_t n = BSP_Range_GetSampleCount();
+        uint16_t n   = BSP_Range_GetSampleCount();
+        uint16_t off = tx_sample_offset;
         uint16_t norm_peak;
         if (n == 0U || n > ADC_SAMPLE_COUNT_MAX)
             n = ADC_SAMPLE_COUNT_MAX;
-        norm_peak = Disp_BuildEchoEx((const uint16_t *)(void *)adc_buf, n, echo128);
-        Disp_DownSendEcho(echo128);
+        if (off >= n) off = 0U;          /* 越界保护 */
+        norm_peak = Disp_SendPackEchoEx((const uint16_t *)(void *)adc_buf + off,
+                                     (uint16_t)(n - off), echo128);
+        Disp_SendEcho(echo128);
 
-        /* 虚假回波曲线：空罐学习基线的 128 点包络。
-         * 已通过带类型的 0x06 帧下发，显示板按类型分缓冲存放，不再与回波曲线互相覆盖。
-         * 归一化基准复用上面的 norm_peak —— 若按基线自身峰值归一化，会把微弱背景
-         * 放大到满屏，看起来像有强回波，是误导性的显示（详见 Disp_BuildCurveNorm 注释）。*/
+        /* 虚假回波曲线：空罐学习基线的 128 点包络（与回波同源同偏移）。
+         * ⚠ 归一化基准必须复用上面的 norm_peak —— 按基线自身峰值归一化会把微弱背景放大成假强回波 */
         if (Algo_HasBaseline())
         {
             const uint16_t *bl = Algo_GetBaseline();
             if (bl != (const uint16_t *)0)
             {
                 static uint8_t echo_false[DISP_ECHO_LEN];
-                (void)Disp_BuildCurveNorm(bl, n, norm_peak, echo_false);
-                Disp_DownSendEchoTyped(DISP_CURVE_FALSE, echo_false);
+                (void)Disp_SendPackCurveNorm(bl + off, (uint16_t)(n - off), norm_peak, echo_false);
+                Disp_SendEchoTyped(DISP_CURVE_FALSE, echo_false);
             }
         }
     }
@@ -187,126 +320,21 @@ static void App_Radar_ProcessSample(void)
     {
         uint8_t reliability = (s_last_result.peak_count > 0U) ? 100U : 0U;
         uint8_t status = (s_last_result.peak_count > 0U) ? 0x01U : 0x00U;
-        Disp_DownSendDiag(reliability, status, 0.0f, 0.0f, App_Config_GetSensorTemp());
+        Disp_SendDiag(reliability, status, 0.0f, 0.0f, App_Config_GetSensorTemp());
     }
 
-    /* ===== 4-20mA 输出（R7 修复）：距离 ↔ 电流线性标定 =====
-     * lowAdjustVal  → 4mA  (DAC=0)
-     * highAdjustVal → 20mA (DAC=65535)
-     * 超界钳位；currMode 决定正/反作用；currFault 决定无效测量时的故障电流。 */
-    {
-        uint16_t dac = 0U;
-        uint8_t  skip_dac = 0U;   /* 1=本次不重写 DAC（故障档"无变化"/硬件报警已验证）*/
-        if (s_last_result.peak_count > 0U)
-        {
-            float lo = gRadarConfig.lowAdjustVal;
-            float hi = gRadarConfig.highAdjustVal;
-            float span = hi - lo;
-            float d = s_last_result.distance;
-            if (span <= 0.0f)
-                span = 1.0f;
-            if (d <= lo)
-                dac = 0U;
-            else if (d >= hi)
-                dac = 65535U;
-            else
-                dac = (uint16_t)((d - lo) / span * 65535.0f);
-
-            /* ---- currMode：4~20mA / 20~4mA 反作用（对齐飞卓 p12 §4.2 原文）----
-             * 飞卓原文：
-             *   "4~20mA表示低料位对应4mA，高料位对应20mA；
-             *    20~4mA表示低料位对应20mA，高料位对应4mA。"
-             * 显示板 dict_currMode = {"4~20mA", "20~4mA"}，索引 0 = 正作用（默认）、
-             * 索引 1 = 反作用，与显示板 MENU_CURRENT_MODE 的 min=0/max=1 一致。
-             *
-             * ⚠ 字段归属纠正（本期首要澄清点）：
-             *   做"电流反作用"的字段是 currMode，不是 outMap。
-             *   outMap 在显示板上的文案是「输出映射 / Out Map」，选项 {"线性","锥筒"}，
-             *   语义是"容器形状 → 体积映射"（线性罐 / 锥筒罐），属算法层，
-             *   与 4~20mA 正反作用无关。此前方案 §3.9 把 outMap 当成反作用开关，
-             *   是字段张冠李戴 —— 若照那个做，菜单里选"锥筒"会翻转电流，
-             *   而"输出模式"选 20~4mA 反而不生效，与显示板文案完全对不上。
-             *
-             * ⚠ 反作用只对【有效测量的线性映射段】生效，不影响故障电流分支：
-             *   故障档走 skip_dac / AD5421_ForceAlarm() 硬件通路，与此处无关。
-             * ⚠ 上线前必须"已知料位 → 测电流"双向验证：反作用若接反，
-             *   低料位会读 20mA（完全反向），是现场最容易被误判为"传感器坏了"的故障。*/
-            if (gRadarConfig.currMode == 1U)   /* 1 = 20~4mA 反作用 */
-            {
-                dac = (uint16_t)(65535U - dac);
-            }
-        }
-        else
-        {
-            /* 无效测量：故障电流 —— 档位语义对齐飞卓（p13 §4.2）：
-             *   0 = 无变化  ：保持上一次输出值（skip_dac=1，不重写 DAC）
-             *   1 = 20.5mA  ：高报警（用芯片硬件报警命令，实测确认实际 mA）
-             *   2 = 22.0mA  ：高报警（同上；若与档1需区分，须实测后改用标定码值）
-             * 注：飞卓正文另有 "<3.8mA" 低报警档，当前显示板无此选项，暂不实现。
-             * ⚠ 20.5/22.0mA 无法用 4~20mA 量程的 DAC 码值直接输出（满码仅 20.0mA），
-             *   故走 AD5421_ForceAlarm() 硬件报警通路。上线前必须用电流表实测三档实际值。
-             * 用 skip_dac 标志而非 return —— 避免"函数末尾新增收尾代码被静默跳过"。*/
-            switch (gRadarConfig.currFault)
-            {
-            case 0U:
-                skip_dac = 1U;                       /* 无变化：保持上一次输出 */
-                break;
-            case 1U:
-                (void)AD5421_ForceAlarm();           /* 高报警档1 */
-                skip_dac = 1U;
-                break;
-            case 2U:
-                (void)AD5421_ForceAlarm();           /* 高报警档2 */
-                skip_dac = 1U;
-                break;
-            default:
-                skip_dac = 1U;                       /* 未知档：保持，不输出未定义电流 */
-                break;
-            }
-        }
-        if (skip_dac == 0U)
-        {
-            /* ---- currMin：最小电流下界（4mA / 3.8mA）----
-             * 对齐飞卓 p13 §4.2："最小电流用于选择输出最小电流为4mA 或3.8mA。"
-             * 显示板 dict_minCurr = {"4mA","3.8mA"}，索引 0 = 4mA、1 = 3.8mA，
-             * 与 MENU_CURRENT_MIN 的 min=0/max=1 一致。
-             *
-             * 语义：这是【环路电流的下限地板】，用于抑制"料位低于低位调整点"时
-             *       电流继续下探。当前线性映射在 d<=lo 时已经钳到 DAC=0（=4mA），
-             *       所以两个档位的差别只在"地板取 4mA 还是取 3.8mA"。
-             *
-             * ⚠⚠ 未闭合项：3.8mA 在当前量程下【无法用 0..65535 的码值表达】。
-             *   AD5421 本工程现行标定是 lowAdjustVal→DAC 0 = 4mA（见上方注释），
-             *   即 DAC 0 已经是 4mA 这条端点。要输出 3.8mA 必须给出一个
-             *   【小于 0 的码值】——物理上不存在。可行路径只有两条：
-             *     ① 把 RANGE0/RANGE1 跳线改到 "3.8~21mA" 档（ad5421.h:75），
-             *        此时 3.8mA 对应 DAC 0，代价是 20mA 上界跟着变成 21mA；
-             *     ② 保持 4~20mA 档，用 16 位 DAC 的【负码值偏移】做不到，
-             *        只能在标定表里多标一个点，实际仍是 4mA 附近，无法真正到 3.8mA。
-             *   两条路都【必须实测】，不能凭线性外推硬算 —— 与 §3.4 已定的纪律一致
-             *   （"代码里的静态事实"不能推成"运行期后果"，DAC 码↔mA 必须实测）。
-             *
-             *   因此本档位先留【占位宏 + 显式告警】，不猜一个数就写死：
-             *   在实测出 3.8mA 对应码值前，currMin==1 与 currMin==0 行为一致（都是 4mA），
-             *   并在下方注释保留待办。这样"选了不生效"是显式可查的，
-             *   而不是静默输出一个错误电流。*/
-#if defined(AD5421_DAC_3P8MA_CALIBRATED)
-            if (gRadarConfig.currMin == 1U)
-            {
-                dac = AD5421_DAC_3P8MA;   /* 3.8mA 地板（实测标定值，见宏定义处）*/
-            }
-#endif
-            /* currMin == 0（4mA）时不做任何修改：dac 已钳在 >= 0，即 >= 4mA 端点。*/
-            AD5421_SetDACOutput(dac);
-        }
-    }
+    /* ===== 4-20mA 输出（2026-10-27 抽成独立函数）=====
+     * lowAdjustVal → 4mA (DAC=0)，highAdjustVal → 20mA (DAC=65535)，超界钳位；
+     * currMode 决定正/反作用，currFault 决定无效测量时的故障电流。
+     * ⚠ 抽成 App_Radar_ApplyCurrentOut() 的原因：原内联写法使【失败路径完全不碰 DAC】，
+     *   测量持续失败时电流会冻结在最后有效值、currFault 报警档失效。见该函数注释。 */
+    App_Radar_ApplyCurrentOut(1U);
 }
 
 void App_Radar_Init(void)
 {
-    /* 算法侧标定 + 运行配置初始化。
-     * zero_offset 为发射时刻到 adc_buf[0] 的距离偏移（米），需现场标定，
-     * 此处先置 0：若 tx_sample_valid 有效则走飞行时间法、不依赖该值。*/
+    /* 算法侧标定 + 运行配置初始化。zero_offset 需现场标定，此处置 0：
+     * tx_sample_valid 有效时走飞行时间法、不依赖该值。*/
     App_Config_Init();
     Algo_InitRadarCalibration(0.0f);
 }
@@ -314,16 +342,40 @@ void App_Radar_Init(void)
 void App_Radar_Run(void)
 {
     uint32_t pulse_us;
+    uint32_t period_us;
     uint32_t error_us;
     uint8_t pulse_count;
 
+    /* ★ 2026-10-22 修 R-11：S7/S9 连发超时兜底。必须放在本函数所有 return 之前 ——
+     *   下面有多处提前 return（f_ic_new=0、period_us=0 等），remain 卡住时恰恰会一直命中
+     *   这些 return，兜底就永远跑不到。超时判定与恢复动作都在 BSP 层，此处只负责上报。*/
+    if (BSP_S7S9_CheckTimeout() != 0U)
+    {
+        printf("[RADAR] S7/S9 remain timeout (UEV lost / burst-type mismatch) -> "
+               "forced clear, AGC resumed\r\n");
+    }
+
+    /* ★ 2026-10-27 修 R-12：TIM3 S3/S4 序列超期自愈上报。
+     *   与上面 R-11 同理，必须放在所有 return 之前 —— 序列超期时 BSP_Pulse_Start 不再被调用，
+     *   adc_done 停在 1 或 0，下面的分支随时可能提前 return，告警就永远打不出来。
+     *   ⚠ 这条日志是这个故障【唯一】的现场线索：修复前它表现为"永久停测、只能复位"，
+     *     修复后表现为"偶发丢 1~2 次测量 + 本行告警"。持续增长 ⇒ 查 TIM3 侧 EMI / CCER 被误写。*/
+    {
+        static uint16_t s_tim3_recover_seen = 0U;
+        uint16_t now = BSP_Timer_GetTim3RecoverCount();
+        if (now != s_tim3_recover_seen)
+        {
+            s_tim3_recover_seen = now;
+            printf("[RADAR] TIM3 S3/S4 sequence overran one ARR period (compare edge lost) -> "
+                   "forced idle, self-heal #%u; measurement resumes on next S6 rising edge\r\n",
+                   (unsigned)now);
+        }
+    }
+
     /* ============================================================
      * 滤波 + 测距接入点（核心）
-     *   TIM7 采样满目标点数（1024~3072）后置 adc_done=1，且 ISR 已自行关闭 TIM7，
-     *   不会再写 adc_buf，此时在主循环读取 adc_buf 是安全的（无 ISR 竞争）。
-     *   用 s_sample_consumed 保证“每完成一次采样只跑一次算法”：
-     *     - adc_done==1 且未消费 -> 跑算法，置消费标志
-     *     - adc_done==0（采样进行中）-> 清消费标志，等采满
+     *   adc_done=1 时 ISR 已关闭 TIM7、不再写 adc_buf，主循环读取无 ISR 竞争；
+     *   s_sample_consumed 保证每完成一次采样只跑一次算法。
      * ============================================================ */
     if (BSP_ADCsamp_IsDone())
     {
@@ -332,7 +384,7 @@ void App_Radar_Run(void)
             s_sample_consumed = 1U;
             App_Radar_ProcessSample();
         }
-        /* 已消费且 adc_done 仍为 1：静默等待下一轮 BSP_ADCsamp_Start 把 adc_done 清 0 */
+        /* 已消费但 adc_done 仍为 1：等待 BSP_ADCsamp_Start 清 0 */
     }
     else
     {
@@ -349,70 +401,68 @@ void App_Radar_Run(void)
         return;
     }
 
-    /* 原子读取脉宽并消费标志 */
+    /* 原子读取被控量并消费标志
+     * ★ 2026-10-13 起闭环改锁【S6 周期】(上升沿→上升沿，K = f_T × 周期)：
+     *   S6 非理想方波，低电平宽度只是周期的间接量，锁低电平 ≠ 锁周期。
+     *   pulse_us 仍读出，仅用于打印对照。 */
     __disable_irq();
-    pulse_us = f_ic_val;
-    f_ic_new = 0U;
+    period_us = BSP_GetS6PeriodUs();
+    pulse_us  = f_ic_val;
+    f_ic_new  = 0U;
     __enable_irq();
 
-    /* 低于死区下界：S9 充电，往中心纠正
-     * 仅设置 s9_remain 与脉宽，实际脉冲由 TIM2 下降沿 ISR 在 S6↓+76μs 触发
-     * error 用距下界 F_IC_LOWER_US 的偏差（与 S7 路径距上界对称），
-     * 这样脉冲接近死区边界时 error→0 < 400 能触发粗→精切换 */
-    if (pulse_us < F_IC_LOWER_US)
+    /* ★ S6 是前提条件，尚未测到周期（=0）时什么都不做：既无从判 S7/S9 的方向与偏差，
+     *   也不该往后走 S3/ADC。等下一个 S6↑ 捕获出周期再判。
+     *   周期需相邻两个上升沿才能算出 ⇒ 上电后首发的 S6↑ 必然走到这里（一次，44ms 量级）。 */
+    if (period_us == 0U)
     {
-        error_us = F_IC_LOWER_US - pulse_us;
+        return;
+    }
+
+    /* 低于周期窗下界：S9 充电。error 取距下界 F_IC_PERIOD_LOWER_US 的偏差（与 S7 距上界对称），
+     * ⚠ 这样接近边界时 error→0 < 400 才能触发粗→精切换；脉冲由 TIM2 下降沿 ISR 在 S6↓+76μs 触发
+     * ⚠ error 现为【周期】偏差，F_IC_SEG* / F_IC_WIDE_TH_US 分段阈值暂沿用原值 —— 若实测发现
+     *   S7/S9 是"占空比不变"型（周期变化是低电平变化的 2 倍），再统一放大分段阈值。 */
+    if (period_us < F_IC_PERIOD_LOWER_US)
+    {
+        error_us = F_IC_PERIOD_LOWER_US - period_us;
         pulse_count = Radar_GetPulseCount(error_us);
-        /* 实时按 error 选脉宽：≥400μs 用 40μs 粗调快速逼近/回拉，<400μs 用 20μs 精调。
-         * 不锁存，过冲到 >400μs 自动切回粗调快速回正，避免锁死后精调区卡死震荡。 */
         BSP_s9_set_width_us((error_us >= F_IC_WIDE_TH_US) ? S7_S9_WIDE_US : S7_S9_FINE_US);
         s9_remain = pulse_count;
-        printf("[RADAR] pulse=%u us, error=%u us -> S9 x %u (%s)\r\n", pulse_us, error_us,
+        printf("[RADAR] period=%u us (low=%u), error=%u us -> S9 x %u (%s)\r\n",
+               period_us, pulse_us, error_us,
                pulse_count, (error_us >= F_IC_WIDE_TH_US) ? "wide" : "fine");
         return;
     }
 
-    /* 高于死区上界：S7 放电，按上边界纠正
-     * 仅设置 s7_remain 与脉宽，实际脉冲由 TIM2 下降沿 ISR 在 S6↓+76μs 触发 */
-    if (pulse_us > F_IC_UPPER_US)
+    /* 高于周期窗上界：S7 放电。脉冲由 TIM2 下降沿 ISR 在 S6↓+76μs 触发 */
+    if (period_us > F_IC_PERIOD_UPPER_US)
     {
-        error_us = pulse_us - F_IC_UPPER_US;
+        error_us = period_us - F_IC_PERIOD_UPPER_US;
         pulse_count = Radar_GetPulseCount(error_us);
-        /* 实时按 error 选脉宽：≥400μs 用 40μs 粗调快速逼近/回拉，<400μs 用 20μs 精调 */
         BSP_s7_set_width_us((error_us >= F_IC_WIDE_TH_US) ? S7_S9_WIDE_US : S7_S9_FINE_US);
         s7_remain = pulse_count;
-        printf("[RADAR] pulse=%u us, error=%u us -> S7 x %u (%s)\r\n", pulse_us, error_us,
+        printf("[RADAR] period=%u us (low=%u), error=%u us -> S7 x %u (%s)\r\n",
+               period_us, pulse_us, error_us,
                pulse_count, (error_us >= F_IC_WIDE_TH_US) ? "wide" : "fine");
         return;
     }
 
-    /* 死区内：无需校正。测量序列（S3/S4/ADC）已由 TIM2 捕获 ISR 在 S6↑ 时
-     * 自动启动（脉宽进入 [F_IC_MEAS_LOWER_US, F_IC_MEAS_UPPER_US] 即触发），
-     * 不经主循环启动，避免调度延迟影响 S3↑ = S6↑+5.9ms 的相位精度 */
+    /* 周期窗内：无需校正。测量序列（S3/S4/ADC）由 TIM2 捕获 ISR 在 S6↑ 时自动启动
+     * （周期落 [F_IC_PERIOD_MEAS_LOWER_US, F_IC_PERIOD_MEAS_UPPER_US] 即触发）、
+     * 不经主循环，以免调度延迟影响 S3↑ = S6↑+5.9ms 的相位精度 */
 }
 
 /* ===================== 调试标定通道（UART4） =====================
- * 与双板串口协议完全独立，仅用于产线/调试时通过 UART4(printf口) 修正算法标定。
+ * 与双板串口协议独立，仅供产线/调试用。启用：在 app_radar.h 取消 DEBUG_CAL_CHANNEL 注释。
+ * 命令：CAL <dist_per_sample_m> <zero_offset_m>（例：CAL 0.0150 0.5）
  *
- * 启用方式：在 app_radar.h 里取消 DEBUG_CAL_CHANNEL 的注释。
- * 命令格式：CAL <dist_per_sample_m> <zero_offset_m>
- *   例：CAL 0.0301 0.5
- *
- * ⚠ 两个参数的效力【并不对等】，原注释"两个参数都能调"是不准确的：
- *   - dist_per_sample：参与两条路径（app_algorithm.c:447 的 TOF 式
- *     与 :452 的降级式），**真正有效**。
- *   - zero_offset：**仅在 tx_sample_valid == 0 的降级路径生效**
- *     （app_algorithm.c:452）。正常运行时采样窗内必然捕获到 S6↓，
- *     tx_sample_valid 恒为 1（走 :447 的飞行时间公式），
- *     该式里【没有 zero_offset 这一项】—— 即正常模式下这个值不参与任何计算。
- *
- * ⚠ 本通道【不写 EEPROM，断电即失效】。开机 App_Radar_Init() 会用编译期常量
- *   RADAR_HW_TIME_STRETCH 重算 dist_per_sample（app_algorithm.c:369）覆盖掉
- *   这里的设置。**标定结果必须固化回 RADAR_HW_TIME_STRETCH 后重新编译**，
- *   否则下次上电就丢了。
- *
- * ⚠ 安全：UART4 即 printf 口，本通道【无鉴权】。故 app_radar.h 里默认关闭，
- *   量产固件不得打开。 */
+ * ⚠ 两参数效力不对等：dist_per_sample 参与 TOF 与降级两条路径，真正有效；
+ *   zero_offset 仅在 tx_sample_valid == 0 的降级路径（Algo_MeasureDistance）生效，
+ *   正常模式 tx_sample_valid 恒为 1、该式不含 zero_offset 项。
+ * ⚠ 本通道不写 EEPROM、断电即失效；开机 App_Radar_Init() 会用 RADAR_HW_TIME_STRETCH
+ *   重算 dist_per_sample 覆盖此设置 —— 标定结果必须固化回该常量后重新编译。
+ * ⚠ 安全：UART4 即 printf 口、无鉴权，app_radar.h 默认关闭，量产固件不得打开。 */
 extern UART_HandleTypeDef huart4;
 
 void App_Debug_Task(void)

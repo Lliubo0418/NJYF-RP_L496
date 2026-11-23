@@ -1,7 +1,6 @@
 #include "adcs7476.h"
 #include "bsp_gpio.h"
 
-// 外部引用 SPI 句柄（假设使用 SPI1）
 extern SPI_HandleTypeDef hspi1;
 
 HAL_StatusTypeDef ADCS7476_Read(uint16_t *pValue)
@@ -12,69 +11,61 @@ HAL_StatusTypeDef ADCS7476_Read(uint16_t *pValue)
         return HAL_ERROR;
     }
 
-    /* 1. 拉低 CS，启动转换（直接 BSRR 写，省去 4 次 HAL_GPIO_WritePin 函数调用开销）
-     *    板上 CS 经反相器：MCU SET → 芯片 CS LOW（选中）*/
-    SPI1_CS_GPIO_Port->BSRR   = SPI1_CS_Pin;            /* SET   PA4 → CS LOW */
-    ADC_CS_X_GPIO_Port->BSRR  = ADC_CS_X_Pin;           /* SET   PC4 → CS LOW */
+    /* CS 低有效、板上【无反相器】(PA4=SPI1_CS / PC4=ADC_CS_X)：MCU 拉低 = 芯片 CS LOW 选中
+     * BSRR 语义：低 16 位写 1 = 置位(HIGH)；高 16 位写 1 = 复位(LOW) */
+    SPI1_CS_GPIO_Port->BSRR   = (uint32_t)SPI1_CS_Pin  << 16U;
+    ADC_CS_X_GPIO_Port->BSRR  = (uint32_t)ADC_CS_X_Pin << 16U;
 
-    /* 2. 确保 SPI 已使能（CubeMX 已使能，这里只做保护性检查）*/
+    /* 保护性检查：SPE 已由 CubeMX 使能 */
     if ((SPI1->CR1 & SPI_CR1_SPE) == 0U)
     {
         SPI1->CR1 |= SPI_CR1_SPE;
     }
 
-    /* 3. 写 dummy 到 DR，启动 SCK 时钟生成 */
+    /* 写 dummy 0xFFFF 到 DR 启动 SCK 时钟生成 */
     *(__IO uint16_t *)&SPI1->DR = 0xFFFFU;
 
-    /* 4. 等 RXNE（接收完成），带超时保护（硬件挂掉时不会卡死）*/
-    /*    2000 次循环 ≈ 250μs@80MHz / 500μs@40MHz，远大于 12.8μs SPI 传输 */
+    /* 等 RXNE；超时 2000 次轮询 ≈250μs@80MHz / 500μs@40MHz，远大于 6.4μs 传输（16bit @ SCK 2.5MHz） */
     timeout = 2000U;
     while ((SPI1->SR & SPI_SR_RXNE) == 0U)
     {
         if (--timeout == 0U)
         {
-            /* SPI 挂了，释放 CS 后返回（BSRR 高 16 位 = RESET）*/
-            SPI1_CS_GPIO_Port->BSRR  = (uint32_t)SPI1_CS_Pin  << 16U;
-            ADC_CS_X_GPIO_Port->BSRR = (uint32_t)ADC_CS_X_Pin << 16U;
+            /* 超时：释放 CS 后返回（置位 → MCU 端 HIGH → 芯片 CS HIGH）*/
+            SPI1_CS_GPIO_Port->BSRR  = SPI1_CS_Pin;
+            ADC_CS_X_GPIO_Port->BSRR = ADC_CS_X_Pin;
             return HAL_TIMEOUT;
         }
     }
 
-    /* 5. 读 DR 取出 16-bit 数据 */
     {
         uint16_t rxData = (uint16_t)*(__IO uint16_t *)&SPI1->DR;
 
-        /* 6. 等 BSY 清零（确保最后一个 SCK 边沿结束）
-         *    超时保护：与上面 RXNE 同级。BSY 长时间不落 ⇒ SPI 时钟/引脚异常
-         *    （时钟树被误改、CS 反相器异常、SCK/MISO 短接等），
-         *    此时必须释放 CS 并返回，绝不能在 16μs 采样 ISR 里裸等。
-         *    2000 次循环 ≈ 250μs@80MHz / 500μs@40MHz，正常路径 BSY 几微秒内
-         *    即清零，循环体一次都不进，时序与原来完全一致。*/
+        /* 等 BSY 清零：正常几微秒内即落。超时 2000 次轮询 ≈250μs@80MHz / 500μs@40MHz。
+         * ⚠ BSY 不落说明 SPI 时钟/引脚异常，必须释放 CS 返回，不可在 16μs 采样 ISR 里裸等 */
         timeout = 2000U;
         while (SPI1->SR & SPI_SR_BSY)
         {
             if (--timeout == 0U)
             {
-                /* BSY 不落，释放 CS 后返回（BSRR 高 16 位 = RESET）*/
-                SPI1_CS_GPIO_Port->BSRR  = (uint32_t)SPI1_CS_Pin  << 16U;
-                ADC_CS_X_GPIO_Port->BSRR = (uint32_t)ADC_CS_X_Pin << 16U;
+                SPI1_CS_GPIO_Port->BSRR  = SPI1_CS_Pin;
+                ADC_CS_X_GPIO_Port->BSRR = ADC_CS_X_Pin;
                 return HAL_TIMEOUT;
             }
         }
 
-        /* 7. 拉高 CS，结束本次转换（BSRR 高 16 位 = RESET → MCU 端 LOW → 芯片 CS HIGH）*/
-        SPI1_CS_GPIO_Port->BSRR  = (uint32_t)SPI1_CS_Pin  << 16U;
-        ADC_CS_X_GPIO_Port->BSRR = (uint32_t)ADC_CS_X_Pin << 16U;
+        /* 释放 CS 结束转换（置位 → MCU 端 HIGH → 芯片 CS HIGH）*/
+        SPI1_CS_GPIO_Port->BSRR  = SPI1_CS_Pin;
+        ADC_CS_X_GPIO_Port->BSRR = ADC_CS_X_Pin;
 
-        /* 8. 提取 12 位有效数据 */
         *pValue = rxData & 0x0FFFU;
     }
 
     return HAL_OK;
 }
 
-/* DMA 异步版已停用（见 bsp_spi.c 说明：TIM7 16μs 周期下 DMA 固定开销过大，
- * 实际采样率仅 ~31kHz），恢复时取消本 #if 0 及 bsp_spi.c / bsp_timer.c 对应开关 */
+/* ⚠ DMA 异步版已停用（TIM7 16μs 周期下 DMA 固定开销过大，实际采样率仅 ~31kHz）；
+ * 恢复时须同时取消本 #if 0 与 bsp_spi.c / bsp_timer.c 对应开关 */
 #if 0
 HAL_StatusTypeDef ADCS7476_Read_DMA(uint16_t *pValue)
 {

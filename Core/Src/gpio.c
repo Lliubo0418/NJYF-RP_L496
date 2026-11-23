@@ -52,11 +52,11 @@ void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, IO1_Pin|IO2_Pin|IO3_Pin|S5_EN_Pin
-                          |ADC_CS_X_Pin|HART_RESET_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, IO1_Pin|IO3_Pin|IO4_Pin|S5_EN_Pin
+                          |HART_RESET_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, SPI1_CS_Pin|RS485_DE_Pin|HART_RTS_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, RS485_DE_Pin|HART_RTS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(SPI2_CS_GPIO_Port, SPI2_CS_Pin, GPIO_PIN_SET);
@@ -64,9 +64,14 @@ void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(EEPROM_WP_GPIO_Port, EEPROM_WP_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : IO1_Pin IO2_Pin IO3_Pin S5_EN_Pin
+  /* PA4(SPI1_CS) / PC4(ADC_CS_X)：板上无反相器、CS 低有效 ⇒ 上电应为【释放】(高)。
+   * CubeMX 原生成的 RESET 在新硬件语义下等于「选中」，故显式补写；.ioc 的 PinState 已同步为 SET。 */
+  HAL_GPIO_WritePin(SPI1_CS_GPIO_Port, SPI1_CS_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(ADC_CS_X_GPIO_Port, ADC_CS_X_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pins : IO1_Pin IO3_Pin IO4_Pin S5_EN_Pin
                            HART_RESET_Pin */
-  GPIO_InitStruct.Pin = IO1_Pin|IO2_Pin|IO3_Pin|S5_EN_Pin
+  GPIO_InitStruct.Pin = IO1_Pin|IO3_Pin|IO4_Pin|S5_EN_Pin
                           |HART_RESET_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;

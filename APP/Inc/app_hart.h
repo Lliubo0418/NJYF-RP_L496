@@ -7,11 +7,9 @@
  * PV（主变量）= 物位/距离（米），由 App_HART_SetPV 更新。
  * USART2：1200bps, 8O1，由 App_HART_Init 重新配置。 */
 
-/* 初始化：把 USART2 配置为 HART 参数（1200 8O1），置 AD5700 为接收模式，
- * 并按 gRadarConfig.servHART / servHARTAddr 设定轮询地址（飞卓 p14 §4.6）：
- *   标准模式 → 地址强制 0；多点模式 → 取 servHARTAddr 并夹取到 1~15。
- * ★须在 MX_USART2_UART_Init() 与 App_Config_LoadFromEEPROM() 【之后】调用，
- *   否则读到的是配置默认值，菜单里设的 HART 模式/地址会被开机流程覆盖。 */
+/* 初始化：USART2 配为 HART 参数（1200 8O1），AD5700 置接收，按 gRadarConfig.servHART /
+ * servHARTAddr 设轮询地址（飞卓 p14 §4.6）：标准模式地址强制 0；多点模式取 servHARTAddr 并夹 1~15。
+ * ⚠ 须在 MX_USART2_UART_Init() 与 App_Config_LoadFromEEPROM() 【之后】调用，否则配置默认值会覆盖菜单设置。 */
 void App_HART_Init(void);
 
 /* 主循环调用：解析主机发来的 HART 帧并自动响应。 */

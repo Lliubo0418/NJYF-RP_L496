@@ -4,11 +4,9 @@
 #include "stm32l4xx_hal.h"
 #include <stdint.h>
 
-// 声明 CubeMX 生成的 SPI 句柄
 extern SPI_HandleTypeDef hspi1;
 extern SPI_HandleTypeDef hspi2;
 
-// 函数声明：通过 SPI 发送并接收数据（全双工）
 /**
   * @brief  通过 SPI 发送并接收数据（全双工）
   * @param  hspi:    SPI 句柄指针
@@ -21,7 +19,6 @@ extern SPI_HandleTypeDef hspi2;
 
 HAL_StatusTypeDef BSP_SPI_TransmitReceive(SPI_HandleTypeDef *hspi, uint8_t *pTxData, uint8_t *pRxData, uint16_t Size, uint32_t Timeout);
 
-// 函数声明：通过 SPI 仅发送数据
 /**
   * @brief  通过 SPI 仅发送数据
   * @param  hspi:    SPI 句柄指针
@@ -33,7 +30,6 @@ HAL_StatusTypeDef BSP_SPI_TransmitReceive(SPI_HandleTypeDef *hspi, uint8_t *pTxD
 
 HAL_StatusTypeDef BSP_SPI_Transmit(SPI_HandleTypeDef *hspi, uint8_t *pData, uint16_t Size, uint32_t Timeout);
 
-// 函数声明：通过 SPI 仅接收数据
 /**
   * @brief  通过 SPI 仅接收数据
   * @param  hspi:    SPI 句柄指针
@@ -45,7 +41,6 @@ HAL_StatusTypeDef BSP_SPI_Transmit(SPI_HandleTypeDef *hspi, uint8_t *pData, uint
 
 HAL_StatusTypeDef BSP_SPI_Receive(SPI_HandleTypeDef *hspi, uint8_t *pData, uint16_t Size, uint32_t Timeout);
 
-// 函数声明：通过 SPI 以 DMA 方式发送数据
 /**
   * @brief  通过 SPI 以 DMA 方式发送数据
   * @param  hspi:  SPI 句柄指针
@@ -56,7 +51,6 @@ HAL_StatusTypeDef BSP_SPI_Receive(SPI_HandleTypeDef *hspi, uint8_t *pData, uint1
 
 HAL_StatusTypeDef BSP_SPI_Transmit_DMA(SPI_HandleTypeDef *hspi, uint8_t *pData, uint16_t Size);
 
-// 函数声明：通过 SPI 以 DMA 方式接收数据
 /**
   * @brief  通过 SPI 以 DMA 方式接收数据
   * @param  hspi:  SPI 句柄指针
@@ -67,7 +61,6 @@ HAL_StatusTypeDef BSP_SPI_Transmit_DMA(SPI_HandleTypeDef *hspi, uint8_t *pData, 
 
 HAL_StatusTypeDef BSP_SPI_Receive_DMA(SPI_HandleTypeDef *hspi, uint8_t *pData, uint16_t Size);
 
-// 函数声明：通过 SPI 以 DMA 方式全双工发送并接收数据
 /**
   * @brief  通过 SPI 以 DMA 方式全双工发送并接收数据
   * @param  hspi:    SPI 句柄指针

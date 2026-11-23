@@ -89,9 +89,10 @@ void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 160-1;            /* 0.5MHz，2μs/tick：16位计数可覆盖 131ms（70m档S3结束于107.82ms）*/
+  htim3.Init.Prescaler = 160-1;            /* 0.5MHz，2μs/tick：16 位计数满量程 131ms，覆盖档5 的 S3↓（稳态 = 零点22.1ms+5120×16µs ≈ 104.0ms）*/
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 59999;               /* 120ms@0.5MHz，覆盖 70m 档 S3 结束沿 53910 tick */
+  htim3.Init.Period = 59999;               /* 120ms@0.5MHz，覆盖最高档 S3 结束沿 58460 tick（= S6_HIGH_MAX_US 35000/2 + 5120×16µs/2 ≈ 116.9ms）；
+                                            * ⚠ 运行时会被 BSP_Pulse_Start 改写为 S3_ARR_MAX_TICK(0xFFFF=131ms)，此值只是上电初值，不参与实际测量 */
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
@@ -170,7 +171,7 @@ void MX_TIM4_Init(void)
   htim4.Instance = TIM4;
   htim4.Init.Prescaler = 8-1;   /* 80MHz/8 = 10MHz → 0.1μs/tick */
   htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim4.Init.Period = 999;      /* 100μs，覆盖 76μs 延时 + 2μs 脉宽 */
+  htim4.Init.Period = 999;      /* 初值 100μs；运行时由 BSP_s7_pulse / BSP_s9_pulse 改写为「延时+脉宽」，见 bsp_timer.c */
   htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim4) != HAL_OK)

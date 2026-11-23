@@ -967,11 +967,6 @@
               <FilePath>..\APP\Src\app_algorithm.c</FilePath>
             </File>
             <File>
-              <FileName>app_hwtest.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\APP\Src\app_hwtest.c</FilePath>
-            </File>
-            <File>
               <FileName>app_radar.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\APP\Src\app_radar.c</FilePath>

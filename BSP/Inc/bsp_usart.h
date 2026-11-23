@@ -5,7 +5,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// 枚举串口实例
 typedef enum {
     BSP_USART_INSTANCE_1 = 0,   // 与STM32F1显示屏通信（自定义协议）
     BSP_USART_INSTANCE_2,       // HART通信（AD5700）
@@ -14,10 +13,8 @@ typedef enum {
     BSP_USART_INSTANCE_MAX
 } BSP_USART_Instance_t;
 
-// 接收回调函数类型
 typedef void (*BSP_USART_RxCallback_t)(BSP_USART_Instance_t instance, uint8_t data);
 
-// 初始化所有串口
 /**
   * @brief  BSP 层 USART 初始化
   * @note   CubeMX 已初始化各串口，此函数仅做必要的额外配置
@@ -25,7 +22,6 @@ typedef void (*BSP_USART_RxCallback_t)(BSP_USART_Instance_t instance, uint8_t da
 
 void BSP_USART_Init(void);
 
-// 阻塞发送
 /**
   * @brief  阻塞发送数据
   * @param  instance: 串口实例
@@ -37,7 +33,6 @@ void BSP_USART_Init(void);
 
 HAL_StatusTypeDef BSP_USART_Send(BSP_USART_Instance_t instance, const uint8_t *pData, uint16_t Size, uint32_t Timeout);
 
-// 阻塞接收
 /**
   * @brief  阻塞接收数据
   * @param  instance: 串口实例
@@ -49,7 +44,6 @@ HAL_StatusTypeDef BSP_USART_Send(BSP_USART_Instance_t instance, const uint8_t *p
 
 HAL_StatusTypeDef BSP_USART_Receive(BSP_USART_Instance_t instance, uint8_t *pData, uint16_t Size, uint32_t Timeout);
 
-// 中断发送（异步）
 /**
   * @brief  中断发送（异步）
   * @param  instance: 串口实例
@@ -60,7 +54,6 @@ HAL_StatusTypeDef BSP_USART_Receive(BSP_USART_Instance_t instance, uint8_t *pDat
 
 HAL_StatusTypeDef BSP_USART_Transmit_IT(BSP_USART_Instance_t instance, const uint8_t *pData, uint16_t Size);
 
-// 中断接收（异步）
 /**
   * @brief  中断接收（异步）
   * @param  instance: 串口实例
@@ -71,7 +64,6 @@ HAL_StatusTypeDef BSP_USART_Transmit_IT(BSP_USART_Instance_t instance, const uin
 
 HAL_StatusTypeDef BSP_USART_Receive_IT(BSP_USART_Instance_t instance, uint8_t *pData, uint16_t Size);
 
-// 注册接收回调函数
 /**
   * @brief  注册接收回调函数
   * @param  instance: 串口实例
@@ -80,7 +72,6 @@ HAL_StatusTypeDef BSP_USART_Receive_IT(BSP_USART_Instance_t instance, uint8_t *p
 
 void BSP_USART_RegisterRxCallback(BSP_USART_Instance_t instance, BSP_USART_RxCallback_t callback);
 
-// 取消中断接收
 /**
   * @brief  取消中断接收
   * @param  instance: 串口实例
@@ -89,18 +80,15 @@ void BSP_USART_RegisterRxCallback(BSP_USART_Instance_t instance, BSP_USART_RxCal
 
 HAL_StatusTypeDef BSP_USART_AbortReceive_IT(BSP_USART_Instance_t instance);
 
-// DMA + 空闲中断接收（异步，根治 ORE）
 /**
   * @brief  DMA + 空闲中断接收（仅 USART1 用）
-  * @note   DMA 硬件自动搬字节到缓冲区，不受 ISR 优先级抢占影响。
-  *         发送方暂停时触发空闲事件回调，届时批量投递到上层再重启 DMA。
-  *         缓冲区由 BSP 内部管理，上层无需提供。
+  * @note   DMA 硬件自动搬字节，不受 ISR 优先级抢占；发送方暂停触发空闲事件，
+  *         届时批量投递到上层再重启 DMA。缓冲区由 BSP 内部管理，上层无需提供。
   * @param  instance: 串口实例
   * @retval HAL 状态
   */
 HAL_StatusTypeDef BSP_USART_ReceiveToIdle_DMA(BSP_USART_Instance_t instance);
 
-// RS485 收发模式切换（仅对 USART3 有效）
 /**
   * @brief  设置 RS485 为发送模式（仅对 USART3 有效）
   * @param  instance: 串口实例
@@ -114,7 +102,6 @@ void BSP_USART_RS485_SetTxMode(BSP_USART_Instance_t instance);
 
 void BSP_USART_RS485_SetRxMode(BSP_USART_Instance_t instance);
 
-// 获取串口句柄
 /**
   * @brief  获取串口句柄
   * @param  instance: 串口实例

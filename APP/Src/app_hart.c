@@ -52,7 +52,7 @@ static void HART_SendResponse(uint8_t delimiter, uint8_t addr, uint8_t cmd,
         memcpy(&frame[idx], data, dlen);
         idx += dlen;
     }
-    /* 校验和：delimiter..data（先算长度再写入，避免 idx 未排序访问） */
+    /* 校验和：覆盖 delimiter..data */
     uint8_t cs_len = (uint8_t)(idx - hdr_start);
     frame[idx] = HART_Checksum(&frame[hdr_start], cs_len);
     idx++;
@@ -72,9 +72,8 @@ static void HART_HandleRequest(const uint8_t *buf, uint8_t len)
     uint8_t addr  = buf[1];
     uint8_t cmd   = buf[2];
     uint8_t bc    = buf[3];
-    if ((uint16_t)bc + 5U > len) return;   /* 长度不足 */
+    if ((uint16_t)bc + 5U > len) return;
 
-    /* 校验和校验 */
     uint8_t cs_calc = HART_Checksum(buf, (uint8_t)(4U + bc));
     if (cs_calc != buf[4U + bc]) return;
 
@@ -184,25 +183,13 @@ void App_HART_Init(void)
     huart2.Init.OverSampling = UART_OVERSAMPLING_16;
     HAL_UART_Init(&huart2);
 
-    /* ---- HART 轮询地址：对齐飞卓 p14 §4.6 原文 ----
-     * 飞卓原文：
-     *   "用  键选择标准或多点工作模式。选择标准工作模式时，本机地址被指定为0；
-     *    若选择多点工作模式，按  键，进入地址设置菜单，地址设置为1—15。"
-     *
-     * 显示板 dict_hart = {"标准","多点"}，索引 0 = 标准、1 = 多点，
-     * 与 MENU_HART_MODE 的 min=0/max=1 一致；
-     * servHARTAddr 由 Page_HARTAddr 编辑（min=0/max=15），经 SET_PARAM 上报。
-     *
-     * ★调用时机约束：本函数必须在 App_Config_LoadFromEEPROM() 【之后】执行，
-     *   否则读到的是 App_Config_Init() 的默认值（servHART=0 → 恒为标准模式，
-     *   用户在菜单里选的多点/地址会被开机流程覆盖掉）。
-     *   main.c 中的实际顺序：:131 LoadFromEEPROM → :135 App_HART_Init，
-     *   已满足该约束。若日后调整 init 顺序，此处必须同步复核。
-     *
-     * ★标准模式下【强制 0】：这是协议语义，不是"取用户值再夹取"。
-     *   多点模式下才取 servHARTAddr，并夹取到合法区间 1~15
-     *   （菜单 min 虽为 0，但多点模式地址 0 非法，会把本机从总线上"藏起来"，
-     *     故这里夹到 1；上限 15 同理，防止 EEPROM 残留越界值）。*/
+    /* ---- HART 轮询地址（对齐飞卓 p14 §4.6）----
+     * ⚠ 调用时机：必须在 App_Config_LoadFromEEPROM() 【之后】执行，否则读到的是
+     *   App_Config_Init() 的默认值（servHART=0 → 恒为标准模式），用户在菜单里选的多点/
+     *   地址会被开机流程覆盖；main.c 的实际顺序已满足该约束，若日后调整须同步复核。
+     * ⚠ 标准模式（servHART != 1）地址【强制 0】，这是协议语义、不是夹取；多点模式才取
+     *   servHARTAddr 并夹到 1~15（多点模式地址 0 非法，会把本机从总线上"藏起来"）。
+     * 显示板 dict_hart 索引 0 = 标准、1 = 多点，与 MENU_HART_MODE 的 min/max 一致。 */
     if (gRadarConfig.servHART == 1U)   /* 1 = 多点模式 */
     {
         uint8_t a = gRadarConfig.servHARTAddr;

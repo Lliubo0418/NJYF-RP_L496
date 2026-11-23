@@ -39,7 +39,6 @@
 #include "bsp_qspi.h"
 #include "w25q128jv.h"
 #include "bsp_timer.h"
-#include "app_hwtest.h"
 #include "delay.h"
 #include "app_radar.h"
 #include "app_config.h"
@@ -124,28 +123,32 @@ int main(void)
   MX_TIM7_Init();
   MX_TIM8_Init();
   /* USER CODE BEGIN 2 */
-  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);
+  /* ★ 启动顺序（风险评估 R-25）：配置与基线必须在 TIM2 捕获启动【之前】全部就绪。
+   *   否则启动期照常采样而 s_has_baseline==0 ⇒ 会拿当前罐内状态误学一条基线（正中 R-04）；
+   *   且 EEPROM 读取耗时数百 ms（基线 10KB @I2C 400kHz），跨 ≥5 个 S6 周期。
+   * ⚠ 顺序不可打乱：
+   *   ① App_Radar_Init() 内含 App_Config_Init()（装载默认档位 1）；
+   *   ② LoadFromEEPROM() 内含 BSP_Range_SetLevel()（恢复用户档位）；
+   *   ③ LoadBaselineFromEEPROM() 按当前档位点数校验基线，要求档位已就绪。
+   *   三者都必须先于 HAL_TIM_IC_Start_IT，否则首帧按旧档位采样、基线校验必失败。*/
+  App_Radar_Init();                   /* 算法标定（距离换算系数）+ 配置默认值 */
+  App_Config_LoadFromEEPROM();        /* 开机从 EEPROM 恢复用户配置（失败则保持默认） */
+  App_Config_LoadBaselineFromEEPROM();/* 开机从 EEPROM 恢复空罐基线（失败/切档 ⇒ 保持无基线，测量 SUPPRESSED，须菜单手动学） */
 
-  /* 雷达业务初始化：算法标定（距离换算系数）等 */
-  App_Radar_Init();
-  App_Config_LoadFromEEPROM();   /* 开机从 EEPROM 恢复用户配置（失败则保持默认） */
   STLM75_Init();                 /* 温度传感器初始化 */
   AD5421_Init();                 /* 4-20mA DAC 初始化 */
   Disp_Init();   /* 注册 USART1 上行命令回调并启动接收（预留） */
   App_HART_Init();               /* HART 从机初始化（USART2 1200 8O1） */
 
+    /* 配置与基线全部就绪后才放开 S6 捕获：此前不会有任何测量序列启动 */
+  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);
+
   /* 注：此处原有开机主动发一帧 PARAM_DUMP(0x05) 的链路自测代码，已删除。
    * 删除理由（§3.10 #C1）：① 该帧注释自述"排查完删除"，属调试残留；
-   *   ② 显示板已有 Disp_UpRequestParamDump() 主动拉取（app_disp.c:245），
+   *   ② 显示板已有 Disp_SendRequestParamDump() 主动拉取（app_disp.c:245），
    *      开机这帧是重复的；③ 它带着 HAL_Delay(100) 阻塞启动路径。*/
 
-  // Test_STLM75M2F();
-  // Test_24LC256();
-//  Test_ADCS7477();
-//  Test_AD5421();
-  // Test_W25Q128JV();
-  // Test_W25Q128JV_Quad();
-
+  /* 注：硬件自测入口 Test_*（app_hwtest.c）不属于本工程。*/
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -155,22 +158,13 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-		Disp_Poll();          /* 处理显示板上行帧（主循环，不阻塞采样） */
+		Disp_RecvPoll();          /* 处理显示板上行帧（主循环，不阻塞采样） */
 		App_HART_Task();      /* HART 从机收发 */
 #ifdef DEBUG_CAL_CHANNEL
 		App_Debug_Task();     /* 调试标定通道（UART4 CAL 命令）；量产默认关闭 */
 #endif
 		App_Radar_Run();
 
-//     HAL_Delay(100);
-//     BSP_s7_pulse();    //当前间隔最小22us以上，视脉宽而定
-//     HAL_Delay(100);
-//     BSP_s9_pulse();
-		// HAL_GPIO_WritePin(GPIOC,GPIO_PIN_6,GPIO_PIN_RESET);
-
-//		HAL_GPIO_WritePin(GPIOC,GPIO_PIN_6,GPIO_PIN_SET);
-//ADCS7476_Read(&adc_value);
-//    HAL_Delay(10);
   }
   /* USER CODE END 3 */
 }

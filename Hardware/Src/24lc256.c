@@ -1,20 +1,23 @@
 #include "24lc256.h"
-#include <string.h> // for memcpy
+#include <string.h>
 
-// 等待 EEPROM 内部写周期完成
+/* ⚠ I2C1 跑 100 kHz：HAL_I2C_Mem_Read() 的超时是【整段传输共享】（tickstart 只在函数入口取一次），
+   10 KB 基线一次读完需约 926 ms，固定 100 ms 必然超时 ⇒ 必须分段，每段独立计 100 ms 预算 */
+#define EEPROM_READ_CHUNK   (256u)
+
+/* ⚠ 24LC256 写周期典型 5ms、最大 10ms：下面的 100ms 超时按此留有裕量 */
 static HAL_StatusTypeDef EEPROM_WaitForWriteComplete(void)
 {
     uint32_t tickstart = HAL_GetTick();
     HAL_StatusTypeDef status;
 
     do {
-        // 每5ms检查一次设备是否就绪，直到超时（典型写周期5ms，最大10ms）[reference:5]
         status = BSP_I2C_IsDeviceReady(EEPROM_24LC256_ADDR, 1, 5);
         if (status == HAL_OK) {
             return HAL_OK;
         }
         HAL_Delay(1);
-    } while ((HAL_GetTick() - tickstart) < 100); // 超时设为100ms
+    } while ((HAL_GetTick() - tickstart) < 100);
 
     return HAL_TIMEOUT;
 }
@@ -23,13 +26,11 @@ HAL_StatusTypeDef EEPROM_WriteByte(uint16_t addr, uint8_t data)
 {
     HAL_StatusTypeDef status;
 
-    // 执行写操作
     status = BSP_I2C_Write(EEPROM_24LC256_ADDR, addr, I2C_MEMADD_SIZE_16BIT, &data, 1, 100);
     if (status != HAL_OK) {
         return status;
     }
 
-    // 等待内部写周期完成
     return EEPROM_WaitForWriteComplete();
 }
 
@@ -46,23 +47,44 @@ HAL_StatusTypeDef EEPROM_WritePage(uint16_t addr, uint8_t *pData, uint16_t len)
         return HAL_ERROR;
     }
 
-    // 执行页写入操作
     status = BSP_I2C_Write(EEPROM_24LC256_ADDR, addr, I2C_MEMADD_SIZE_16BIT, pData, len, 100);
     if (status != HAL_OK) {
         return status;
     }
 
-    // 等待内部写周期完成
     return EEPROM_WaitForWriteComplete();
 }
 
 HAL_StatusTypeDef EEPROM_ReadBytes(uint16_t addr, uint8_t *pData, uint16_t len)
 {
+    uint16_t offset = 0u;
+    uint32_t cur_addr;
+
     if (pData == NULL || len == 0) {
         return HAL_ERROR;
     }
-    // 24LC256支持顺序读取，一次可读取任意长度
-    return BSP_I2C_Read(EEPROM_24LC256_ADDR, addr, I2C_MEMADD_SIZE_16BIT, pData, len, 100);
+
+    while (len > 0u) {
+        /* 按 256 字节分段：单段约 23 ms 远小于 100 ms 预算；上电读 10 KB 共约 0.95 s，运行期无调用 */
+        uint16_t chunk = (len > EEPROM_READ_CHUNK) ? (uint16_t)EEPROM_READ_CHUNK : len;
+        HAL_StatusTypeDef st;
+
+        cur_addr = (uint32_t)addr + (uint32_t)offset;
+        if (cur_addr > 0xFFFFu) {
+            return HAL_ERROR;
+        }
+
+        st = BSP_I2C_Read(EEPROM_24LC256_ADDR, (uint16_t)cur_addr,
+                              I2C_MEMADD_SIZE_16BIT, pData + offset, chunk, 100);
+        if (st != HAL_OK) {
+            return st;
+        }
+
+        offset += chunk;
+        len    -= chunk;
+    }
+
+    return HAL_OK;
 }
 
 HAL_StatusTypeDef EEPROM_WriteBytes(uint16_t addr, uint8_t *pData, uint16_t len)
@@ -76,17 +98,15 @@ HAL_StatusTypeDef EEPROM_WriteBytes(uint16_t addr, uint8_t *pData, uint16_t len)
     }
 
     while (len > 0) {
-        // 计算当前页剩余空间
+        /* ⚠ 24LC256 页写达页尾会回卷覆盖页首：必须按 64 字节页边界切分 */
         uint16_t page_remain = EEPROM_PAGE_SIZE - (addr % EEPROM_PAGE_SIZE);
         bytes_to_write = (len < page_remain) ? len : page_remain;
 
-        // 执行页写入
         status = EEPROM_WritePage(addr, pData + offset, bytes_to_write);
         if (status != HAL_OK) {
             return status;
         }
 
-        // 更新变量
         addr += bytes_to_write;
         offset += bytes_to_write;
         len -= bytes_to_write;

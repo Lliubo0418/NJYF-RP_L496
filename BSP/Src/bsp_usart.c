@@ -7,7 +7,7 @@
 /* 串口用途与引脚（来自 usart.c MspInit）：
  *   UART4  调试 printf      PA0=TX  PA1=RX
  *   USART1 显示屏(STM32F1)  PA9=TX  PA10=RX
- *   USART2 HART(AD5700)     PA2=TX  PA3=RX   控制: RTS=PC0 CD=PC1 RST=PC2 (见 bsp_gpio)
+ *   USART2 HART(AD5700)     PA2=TX  PA3=RX   控制: RTS=PA12 CD=PA11 RST=PC5 (见 bsp_gpio)
  *   USART3 RS485            PC10=TX PC11=RX  方向: DE=PA8 (见 bsp_gpio)
  */
 // 声明 CubeMX 生成的 UART 句柄
@@ -52,7 +52,6 @@ static BSP_USART_Instance_t GetInstanceFromHandle(UART_HandleTypeDef *huart)
 void BSP_USART_Init(void)
 {
     // CubeMX 已经完成硬件初始化，此处无需重复操作
-    // 如果需要额外配置（如中断优先级），可以在这里添加
 }
 
 HAL_StatusTypeDef BSP_USART_Send(BSP_USART_Instance_t instance, const uint8_t *pData, uint16_t Size, uint32_t Timeout)
@@ -120,8 +119,8 @@ UART_HandleTypeDef* BSP_USART_GetHandle(BSP_USART_Instance_t instance)
     return uart_handles[instance];
 }
 
-// -------------------- RS485 收发模式切换（USART3, DE=PC12）--------------------
-// 收发器 DE 与 /RE 共接 PC12：HIGH=发送, LOW=接收。引脚操作集中在 bsp_gpio。
+// -------------------- RS485 收发模式切换（USART3, DE=PA8）--------------------
+// 收发器 DE 与 /RE 共接 PA8：HIGH=发送, LOW=接收。引脚操作集中在 bsp_gpio。
 
 void BSP_USART_RS485_SetTxMode(BSP_USART_Instance_t instance)
 {
@@ -177,9 +176,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 /**
   * @brief  DMA 接收 + 空闲事件回调（由 HAL 库调用）
-  * @note   发送方暂停（IDLE）或 DMA 缓冲满/半满时触发。
-  *         此处把 DMA 缓冲中的字节逐个投递到上层回调（入环形缓冲），
-  *         然后立即重启 DMA 接收下一批。全程不依赖 ISR 实时逐字节响应。
+  * @note   IDLE 或 DMA 缓冲满/半满时触发：把缓冲字节逐个投递到上层（入环形缓冲）
+  *         后立即重启 DMA，全程不依赖 ISR 实时逐字节响应。
   * @param  huart: UART 句柄指针
   * @param  Size: 本次接收到的字节数
   */
@@ -188,16 +186,15 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
     BSP_USART_Instance_t inst = GetInstanceFromHandle(huart);
     if (inst >= BSP_USART_INSTANCE_MAX) return;
 
-    /* DMA 半传事件（缓冲收到一半，Size=64）：必须直接返回，不投递也不重启。
-     * HAL 在 TOIDLE 模式下半满也会触发本回调；若此时重启 DMA，后半段传输被破坏，
-     * 且前半批字节会在随后的 IDLE/TC 回调中被重复投递。 */
+    /* ⚠ DMA 半传事件（Size=64）必须直接返回、不投递也不重启：HAL 在 TOIDLE 模式下
+     *   半满也触发本回调，此时重启会破坏后半段传输并重复投递前半批字节。 */
     if (huart->RxEventType == HAL_UART_RXEVENT_HT)
     {
         return;
     }
 
     /* IDLE（总线空闲）或 TC（128 字节缓冲满）：把接收到的字节逐个投递到上层
-     * 回调（入环形缓冲），上层在 Disp_Poll 中解析。Size=本次 DMA 传输总字节数 */
+     * 回调（入环形缓冲），上层在 Disp_RecvPoll 中解析。Size=本次 DMA 传输总字节数 */
     if (rx_callbacks[inst] != NULL && Size > 0)
     {
         uint8_t *p = huart->pRxBuffPtr;
@@ -213,9 +210,8 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 
 /**
   * @brief  UART 错误回调：处理 ORE/NE/FE/PE 等错误，自动恢复接收
-  * @note   IT 模式的串口（USART2/3/4）清错误后重启单字节 IT 接收；
-  *         DMA 模式的串口（USART1）清错误后重启 DMA 接收。
-  *         根因是优先级抢占导致 ISR 被阻塞；DMA 硬件搬运根治此问题。
+  * @note   IT 模式的串口（USART2/3/4）清错误后重启单字节 IT 接收；DMA 模式的串口
+  *         （USART1）清错误后重启 DMA 接收。根因是优先级抢占阻塞 ISR，DMA 硬件搬运根治。
   */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
